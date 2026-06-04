@@ -65,6 +65,46 @@ For larger and distributed factorizations, discrete logarithms, and full
 parameter documentation, see the upstream guides preserved in this tree:
 [`README`](README), [`README.dlp`](README.dlp), and [`README.Python`](README.Python).
 
+## Performance
+
+Reference timings factoring balanced (RSA-like) semiprimes on an
+**Intel i9-10850K (10 cores / 20 threads), 64 GiB RAM, CachyOS**, GMP 6.3.0,
+all 20 threads. Every result was verified (factors multiply back to the input
+and are prime).
+
+| Digits | Bits | Wall time | CADO CPU | Parallel speedup |
+|-------:|-----:|----------:|---------:|-----------------:|
+| 60 | ~199 | 30.6 s | 57.8 s | 1.9× |
+| 70 | ~232 | 35.4 s | 121.8 s | 3.5× |
+| 80 | ~265 | 73.9 s | 558.0 s | 7.6× |
+| 90 | ~299 | 175.3 s | 1942.7 s | 11.1× |
+
+Per-phase CPU (seconds), showing where the work goes:
+
+| Digits | Lattice sieving | Filtering | Linear algebra | Square root |
+|-------:|----------------:|----------:|---------------:|------------:|
+| 60 | 39.4 | 20.9 | 3.7 | 0.7 |
+| 80 | 342.2 | 44.0 | 39.1 | 5.1 |
+| 90 | 1409.7 | 130.6 | 366.2 | 31.7 |
+
+**Key findings**
+
+- **Sieving dominates** (61-73 % of CPU) and is the embarrassingly-parallel
+  phase, so **parallel efficiency rises with size** (1.9×→11.1×): at small sizes
+  fixed sequential overhead swamps the tiny sieve; at c90 the 20 threads stay
+  busy.
+- **Linear algebra grows the fastest** of any phase (~100× from c60 to c90 vs
+  ~36× for sieving) and is the emerging second bottleneck — the classic NFS
+  trade-off.
+- **Wall-time roughly doubles per +10 digits** (CPU work grows 3.5-4.6×),
+  consistent with the sub-exponential `L(1/3)` complexity of NFS.
+- **Practical envelope on this desktop:** ≤c75 interactive (< 1 min) · c80-c95 a
+  few minutes · ~c100 ≈ 10-15 min · ~c110 ≈ 1 hr · c120 overnight · ≥c130 wants
+  distributed mode. Comfortable single-session ceiling ≈ **c105-c110**.
+
+Full methodology, seeded reproducible inputs, projections, and notes:
+[**`BENCHMARKS.md`**](BENCHMARKS.md).
+
 ## What changed in this fork
 
 | Area | Change | Why |
