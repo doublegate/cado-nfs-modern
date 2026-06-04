@@ -121,11 +121,16 @@ modernization record.
 
 ## How it works
 
-For a mathematical explanation of the Number Field Sieve — the
-congruence-of-squares idea, the two-polynomial number-field construction,
-smoothness and sieving, the $\mathbb{F}_2$ linear algebra, the algebraic square
-root, complexity, and how each phase maps to the directories in this tree — see
-[**`docs/number-field-sieve.md`**](docs/number-field-sieve.md).
+Two companion explainers of the Number Field Sieve, depending on your background:
+
+- **Plain English, no math** — [`docs/number-field-sieve-plain-english.md`](docs/number-field-sieve-plain-english.md):
+  a friendly, analogy-driven tour for any curious reader (why factoring is hard,
+  what the program does, and why it matters for online security).
+- **The mathematics** — [`docs/number-field-sieve.md`](docs/number-field-sieve.md):
+  the rigorous version — congruence of squares, the two-polynomial number-field
+  construction, smoothness and sieving, the $\mathbb{F}_2$ linear algebra, the
+  algebraic square root, complexity, and how each phase maps to the directories
+  in this tree.
 
 ## License
 

@@ -13,6 +13,10 @@ together. Mathematical notation is rendered with GitHub's LaTeX support.
 > algebra (rings, ideals, finite fields) is assumed. No prior knowledge of NFS
 > is required; the ideas are built up from the classical congruence-of-squares
 > method.
+>
+> **No math background?** Read the plain-English companion first:
+> [`number-field-sieve-plain-english.md`](number-field-sieve-plain-english.md) —
+> same ideas, everyday analogies, no formulas.
 
 ---
 
