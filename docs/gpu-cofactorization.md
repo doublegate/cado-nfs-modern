@@ -152,9 +152,20 @@ backend; the remaining work is integration + refinement.
        `B1/B2` ECM is no better than `facul`'s tuned strategy at finding the
        *valid* (≤ lpb) factorizations, and the per-region launch + 128-bit
        overhead is pure cost.
-     - **`-t` ran single-threaded** here (`threadpool of 1 threads`), so the
-       "free a CPU core to sieve" overlap could not be exercised; but the Amdahl
-       ceiling and the equal-yield finding mean overlap alone could not flip it.
+     - **Multi-thread + GPU streams (overlap pursued).** Real worker threads need
+       the explicit placement `-t machine,1,N` (the plain `-t N` alias resolves to
+       1 thread/job here). At `-t machine,1,8`, heavy regime, q 600000–601000:
+       CPU-only **23 s, 1236 rel/wall** (threading scales ~7×). The GPU drain with
+       8 threads on the *legacy default stream* was catastrophic — **249 s** (the
+       launches + device-wide `cudaMalloc`/`cudaDeviceSynchronize` serialize across
+       threads). Switching `gpu_ecm.cu` to the **per-thread default stream** +
+       `cudaMallocAsync`/`cudaFreeAsync`/`cudaStreamSynchronize` cut that to
+       **53.7 s, 537 rel/wall** (4.6× better, `−0 lost`) — but still **2.3× below**
+       CPU-only. Overlap helped a lot yet did not flip it: the GPU cofactoring
+       (per-region small launches, 128-bit iteration) cannot out-throughput 8 CPU
+       cores running `facul`, and it adds no valid relations. A producer-consumer
+       design with far larger batches could shave the launch overhead, but the GPU
+       compute itself is already the bottleneck, so it would not close a 2.3× gap.
 5. ✅ **Full in-CADO CUDA build works.** With `-DENABLE_GPU=ON`
    `-DCMAKE_CUDA_ARCHITECTURES=86`, `gpu_ecm.cu` compiles under `nvcc` inside
    CADO's C++20/`-Werror` build (no flag conflicts), `gpu_cofac.cpp` compiles,

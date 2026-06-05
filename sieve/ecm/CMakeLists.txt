@@ -77,6 +77,11 @@ if(HAVE_GPU_ECM)
     target_sources(facul PRIVATE gpu_ecm.cu)
     target_compile_definitions(facul PUBLIC HAVE_GPU_ECM=1)
     target_link_libraries(facul CUDA::cudart)
+    # Per-thread default stream: with -t machine,1,N the GPU drain is called
+    # concurrently from N worker threads; this gives each its own default stream
+    # so launches do not serialize on the legacy default stream.
+    set_source_files_properties(gpu_ecm.cu PROPERTIES
+        COMPILE_OPTIONS "--default-stream=per-thread")
 else()
     target_sources(facul PRIVATE gpu_ecm_stub.cpp)
 endif()

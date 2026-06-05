@@ -161,22 +161,26 @@ void factor_batch(std::vector<uint64_t> const & moduli, int ncurves,
                     rs^=rs<<13; rs^=rs>>7; rs^=rs<<17; seed[l]=(rs%N)|2; }
             else  { n[l]=0; np[l]=0; R1[l]=0; R2[l]=0; seed[l]=0; } } }
 
+    /* stream-ordered allocation on the per-thread default stream so concurrent
+     * worker threads (-t machine,1,N) neither serialize on the legacy default
+     * stream nor on the device-wide cudaMalloc lock */
+    cudaStream_t const st = cudaStreamPerThread;
     u64 *dn,*dnp,*dR1,*dR2,*dse,*ds,*dpr,*dfac;
-    cudaMalloc(&dn,L*8);cudaMalloc(&dnp,L*8);cudaMalloc(&dR1,L*8);cudaMalloc(&dR2,L*8);cudaMalloc(&dse,L*8);cudaMalloc(&dfac,L*8);
-    cudaMalloc(&ds,(ns?ns:1)*8);cudaMalloc(&dpr,(npr?npr:1)*8);
-    cudaMemcpy(dn,n.data(),L*8,cudaMemcpyHostToDevice);cudaMemcpy(dnp,np.data(),L*8,cudaMemcpyHostToDevice);
-    cudaMemcpy(dR1,R1.data(),L*8,cudaMemcpyHostToDevice);cudaMemcpy(dR2,R2.data(),L*8,cudaMemcpyHostToDevice);
-    cudaMemcpy(dse,seed.data(),L*8,cudaMemcpyHostToDevice);
-    if(ns) cudaMemcpy(ds,s.data(),ns*8,cudaMemcpyHostToDevice);
-    if(npr) cudaMemcpy(dpr,pr.data(),npr*8,cudaMemcpyHostToDevice);
+    cudaMallocAsync(&dn,L*8,st);cudaMallocAsync(&dnp,L*8,st);cudaMallocAsync(&dR1,L*8,st);cudaMallocAsync(&dR2,L*8,st);cudaMallocAsync(&dse,L*8,st);cudaMallocAsync(&dfac,L*8,st);
+    cudaMallocAsync(&ds,(ns?ns:1)*8,st);cudaMallocAsync(&dpr,(npr?npr:1)*8,st);
+    cudaMemcpyAsync(dn,n.data(),L*8,cudaMemcpyHostToDevice,st);cudaMemcpyAsync(dnp,np.data(),L*8,cudaMemcpyHostToDevice,st);
+    cudaMemcpyAsync(dR1,R1.data(),L*8,cudaMemcpyHostToDevice,st);cudaMemcpyAsync(dR2,R2.data(),L*8,cudaMemcpyHostToDevice,st);
+    cudaMemcpyAsync(dse,seed.data(),L*8,cudaMemcpyHostToDevice,st);
+    if(ns) cudaMemcpyAsync(ds,s.data(),ns*8,cudaMemcpyHostToDevice,st);
+    if(npr) cudaMemcpyAsync(dpr,pr.data(),npr*8,cudaMemcpyHostToDevice,st);
 
-    ecm_kernel<<<(L+63)/64,64>>>(dn,dnp,dR1,dR2,dse,ds,ns,dpr,npr,dfac,L,ncurves);
-    cudaDeviceSynchronize();
+    ecm_kernel<<<(L+63)/64,64,0,st>>>(dn,dnp,dR1,dR2,dse,ds,ns,dpr,npr,dfac,L,ncurves);
 
-    std::vector<u64> fl(L); cudaMemcpy(fl.data(),dfac,L*8,cudaMemcpyDeviceToHost);
+    std::vector<u64> fl(L); cudaMemcpyAsync(fl.data(),dfac,L*8,cudaMemcpyDeviceToHost,st);
+    cudaFreeAsync(dn,st);cudaFreeAsync(dnp,st);cudaFreeAsync(dR1,st);cudaFreeAsync(dR2,st);cudaFreeAsync(dse,st);cudaFreeAsync(dfac,st);cudaFreeAsync(ds,st);cudaFreeAsync(dpr,st);
+    cudaStreamSynchronize(st);
+
     for(int i=0;i<M;i++) for(int j=0;j<ncurves;j++){ u64 f=fl[i*ncurves+j]; if(f){ factor[i]=f; break; } }
-
-    cudaFree(dn);cudaFree(dnp);cudaFree(dR1);cudaFree(dR2);cudaFree(dse);cudaFree(dfac);cudaFree(ds);cudaFree(dpr);
 }
 
 void factor_batch_128(std::vector<uint64_t> const & mod_lo,
@@ -206,22 +210,23 @@ void factor_batch_128(std::vector<uint64_t> const & mod_lo,
                     rs^=rs<<13; rs^=rs>>7; rs^=rs<<17; sd|=rs; seed[l]=(sd%N)|2; }
             else  { n[l]=0; np[l]=0; R1[l]=0; R2[l]=0; seed[l]=0; } } }
 
+    cudaStream_t const st = cudaStreamPerThread;
     u128 *dn,*dR1,*dR2,*dse,*dfac; u64 *dnp,*ds,*dpr;
-    cudaMalloc(&dn,L*16);cudaMalloc(&dR1,L*16);cudaMalloc(&dR2,L*16);cudaMalloc(&dse,L*16);cudaMalloc(&dfac,L*16);
-    cudaMalloc(&dnp,L*8);cudaMalloc(&ds,(ns?ns:1)*8);cudaMalloc(&dpr,(npr?npr:1)*8);
-    cudaMemcpy(dn,n.data(),L*16,cudaMemcpyHostToDevice);cudaMemcpy(dR1,R1.data(),L*16,cudaMemcpyHostToDevice);
-    cudaMemcpy(dR2,R2.data(),L*16,cudaMemcpyHostToDevice);cudaMemcpy(dse,seed.data(),L*16,cudaMemcpyHostToDevice);
-    cudaMemcpy(dnp,np.data(),L*8,cudaMemcpyHostToDevice);
-    if(ns) cudaMemcpy(ds,s.data(),ns*8,cudaMemcpyHostToDevice);
-    if(npr) cudaMemcpy(dpr,pr.data(),npr*8,cudaMemcpyHostToDevice);
+    cudaMallocAsync(&dn,L*16,st);cudaMallocAsync(&dR1,L*16,st);cudaMallocAsync(&dR2,L*16,st);cudaMallocAsync(&dse,L*16,st);cudaMallocAsync(&dfac,L*16,st);
+    cudaMallocAsync(&dnp,L*8,st);cudaMallocAsync(&ds,(ns?ns:1)*8,st);cudaMallocAsync(&dpr,(npr?npr:1)*8,st);
+    cudaMemcpyAsync(dn,n.data(),L*16,cudaMemcpyHostToDevice,st);cudaMemcpyAsync(dR1,R1.data(),L*16,cudaMemcpyHostToDevice,st);
+    cudaMemcpyAsync(dR2,R2.data(),L*16,cudaMemcpyHostToDevice,st);cudaMemcpyAsync(dse,seed.data(),L*16,cudaMemcpyHostToDevice,st);
+    cudaMemcpyAsync(dnp,np.data(),L*8,cudaMemcpyHostToDevice,st);
+    if(ns) cudaMemcpyAsync(ds,s.data(),ns*8,cudaMemcpyHostToDevice,st);
+    if(npr) cudaMemcpyAsync(dpr,pr.data(),npr*8,cudaMemcpyHostToDevice,st);
 
-    ecm_kernel128<<<(L+63)/64,64>>>(dn,dnp,dR1,dR2,dse,ds,ns,dpr,npr,dfac,L);
-    cudaDeviceSynchronize();
+    ecm_kernel128<<<(L+63)/64,64,0,st>>>(dn,dnp,dR1,dR2,dse,ds,ns,dpr,npr,dfac,L);
 
-    std::vector<u128> fl(L); cudaMemcpy(fl.data(),dfac,L*16,cudaMemcpyDeviceToHost);
+    std::vector<u128> fl(L); cudaMemcpyAsync(fl.data(),dfac,L*16,cudaMemcpyDeviceToHost,st);
+    cudaFreeAsync(dn,st);cudaFreeAsync(dR1,st);cudaFreeAsync(dR2,st);cudaFreeAsync(dse,st);cudaFreeAsync(dfac,st);cudaFreeAsync(dnp,st);cudaFreeAsync(ds,st);cudaFreeAsync(dpr,st);
+    cudaStreamSynchronize(st);
+
     for(int i=0;i<M;i++) for(int j=0;j<ncurves;j++){ u128 f=fl[i*ncurves+j]; if(f){ fac_lo[i]=(u64)f; fac_hi[i]=(u64)(f>>64); break; } }
-
-    cudaFree(dn);cudaFree(dR1);cudaFree(dR2);cudaFree(dse);cudaFree(dfac);cudaFree(dnp);cudaFree(ds);cudaFree(dpr);
 }
 
 } // namespace gpu_ecm
