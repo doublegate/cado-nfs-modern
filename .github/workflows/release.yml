@@ -1,0 +1,153 @@
+name: Release
+
+# Publishes a GitHub Release when a fork version tag (v*-modern) is pushed, or on
+# manual dispatch with an existing tag. The release is gated on a green build +
+# verified factorization, ships a complete source tarball built with `git archive`
+# (not `make dist`, whose files.dist manifest omits the fork's added files), and
+# uses curated notes from .github/release-notes/<tag>.md when present, else the
+# matching CHANGELOG.md section.
+
+on:
+  push:
+    tags: ['v*-modern']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to release (e.g. v3.0.0-modern)'
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  # Prove the tagged tree builds and factors a number end-to-end before publishing.
+  verify:
+    name: verify build + smoke factor
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout (at the tag)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake libgmp-dev libhwloc-dev \
+            python3 python3-venv python3-pip perl
+
+      - name: Tool versions
+        run: |
+          gcc --version | head -1
+          cmake --version | head -1
+          python3 --version
+
+      - name: Set up Python venv (orchestrator deps)
+        run: bash scripts/setup-venv.sh
+
+      - name: Build
+        run: make -j"$(nproc)"
+
+      - name: Unit tests (fast subset)
+        run: |
+          cd "build/$(hostname)"
+          ctest --output-on-failure -R 'test_bitlinalg|sievetest_I|numbertheory'
+
+      - name: Smoke factorization (59-digit)
+        run: |
+          PY=cado-nfs.venv/bin/python3
+          OUT=$("$PY" ./cado-nfs.py 90377629292003121684002147101760858109247336549001090677693 -t 2)
+          echo "Factors: $OUT"
+          python3 - "$OUT" <<'PY'
+          import sys
+          N = 90377629292003121684002147101760858109247336549001090677693
+          factors = [int(x) for x in sys.argv[1].split()]
+          prod = 1
+          for f in factors:
+              prod *= f
+          assert prod == N, f"product {prod} != N {N}"
+          assert all(pow(2, f - 1, f) == 1 for f in factors), "a factor is composite"
+          print(f"OK: {len(factors)} prime factors, product == N")
+          PY
+
+  release:
+    name: publish release
+    needs: verify
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout (full history at the tag)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Resolve tag/version
+        id: ver
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          VERSION="${TAG#v}"                      # v3.0.0-modern -> 3.0.0-modern
+          echo "tag=$TAG"          >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION"  >> "$GITHUB_OUTPUT"
+          case "$TAG" in
+            *-rc*|*-alpha*|*-beta*) echo "prerelease=true"  >> "$GITHUB_OUTPUT" ;;
+            *)                      echo "prerelease=false" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - name: Build source tarball (git archive — complete tracked tree)
+        id: archive
+        run: |
+          TAG="${{ steps.ver.outputs.tag }}"
+          VERSION="${{ steps.ver.outputs.version }}"
+          NAME="cado-nfs-${VERSION}"
+          git archive --format=tar.gz --prefix="${NAME}/" -o "${NAME}.tar.gz" "$TAG"
+          sha256sum "${NAME}.tar.gz" > "${NAME}.tar.gz.sha256"
+          echo "tarball=${NAME}.tar.gz"        >> "$GITHUB_OUTPUT"
+          echo "checksum=${NAME}.tar.gz.sha256" >> "$GITHUB_OUTPUT"
+          echo "## tarball contents (top level):"; tar tzf "${NAME}.tar.gz" | sed "s|${NAME}/||" | awk -F/ 'NF<=1' | sort -u | head -40
+
+      - name: Resolve release notes
+        id: notes
+        run: |
+          TAG="${{ steps.ver.outputs.tag }}"
+          VERSION="${{ steps.ver.outputs.version }}"
+          CURATED=".github/release-notes/${TAG}.md"
+          if [ -f "$CURATED" ]; then
+            echo "Using curated notes: $CURATED"
+            cp "$CURATED" notes.md
+          else
+            echo "No curated notes; extracting the [$VERSION] section from CHANGELOG.md"
+            awk -v ver="$VERSION" '
+              $0 ~ "^## \\[" ver "\\]" {grab=1; next}
+              grab && /^## \[/ {exit}
+              grab {print}
+            ' CHANGELOG.md > notes.md
+            if [ ! -s notes.md ]; then
+              echo "Release ${TAG}. See CHANGELOG.md for details." > notes.md
+            fi
+          fi
+          echo "----- notes.md (head) -----"; head -20 notes.md
+
+      - name: Create or update the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ steps.ver.outputs.tag }}"
+          PREREL=""
+          [ "${{ steps.ver.outputs.prerelease }}" = "true" ] && PREREL="--prerelease" || PREREL="--latest"
+          ARGS=(--title "CADO-NFS ${TAG}" --notes-file notes.md $PREREL \
+                "${{ steps.archive.outputs.tarball }}" \
+                "${{ steps.archive.outputs.checksum }}")
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG exists — updating notes and assets."
+            gh release edit "$TAG" --title "CADO-NFS ${TAG}" --notes-file notes.md $PREREL
+            gh release upload "$TAG" "${{ steps.archive.outputs.tarball }}" "${{ steps.archive.outputs.checksum }}" --clobber
+          else
+            gh release create "$TAG" "${ARGS[@]}"
+          fi
+          echo "Done: $(gh release view "$TAG" --json url -q .url)"
