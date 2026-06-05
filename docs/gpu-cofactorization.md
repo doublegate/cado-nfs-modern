@@ -54,9 +54,15 @@ backend; the remaining work is integration + refinement.
 ## Integration roadmap (remaining)
 
 1. ~~GPU ECM stage-1 kernel~~ ✅ done (`bench/gpu-ecm.cu`): validated bit-exact,
-   finds factors, benchmarked. Refinements: **2-word (128-bit) moduli** for larger
-   `mfb`, optional **stage 2**, and **Suyama sigma** parametrization (higher hit
-   rate than the proof-of-concept a24/x0=2 curve).
+   finds factors, benchmarked. Refinements:
+   - ✅ **Suyama-σ parametrization** (`bench/gpu-ecm-suyama.cu`) — curves with
+     guaranteed torsion 12; device modular inverse (with lucky-factor-in-setup);
+     ~1.08× more composites cracked at a fixed low curve budget vs the POC curve.
+   - ✅ **128-bit (2-limb) Montgomery modmul** (`bench/gpu-mont128.cu`) — CIOS
+     REDC, validated bit-exact on CPU and GPU over 200 000 trials; the core for
+     larger-`mfb` cofactors. Full 128-bit ECM = the validated 64-bit ladder/curve
+     structure over this modmul.
+   - ⏳ optional **stage 2** (BSGS) for higher per-curve yield.
 2. **Batching layer** behind `facul_all` (`sieve/las-cofactor.cpp` /
    `sieve/ecm/facul.cpp`): accumulate survivors across special-q into a device
    batch, launch the kernel, return factors. Tune batch size vs PCIe latency and
