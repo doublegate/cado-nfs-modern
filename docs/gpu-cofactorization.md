@@ -66,22 +66,36 @@ backend; the remaining work is integration + refinement.
      `[r]Q`, giant steps `[mW]Q`, accumulated cross-differences with one final
      gcd; validated bit-exact GPU vs CPU, and finds **+64% more factors per
      curve** (1011 → 1663 / 2048 composites at B1=2000, B2=50000).
-2. **Batching layer** behind `facul_all` (`sieve/las-cofactor.cpp` /
-   `sieve/ecm/facul.cpp`): accumulate survivors across special-q into a device
-   batch, launch the kernel, return factors. Tune batch size vs PCIe latency and
-   the sieve's per-region cadence.
-3. **CMake CUDA detection** (`/opt/cuda`), `sm_86` target, behind an
-   `ENABLE_GPU` flag; CPU path stays default.
-4. **Benchmark** relations/sec and CPU-utilization shift (toward sieving) with vs
-   without the GPU on a c100–c120 run, then retune `ncurves`/`mfb` to exploit the
-   cheap cofactorization.
+2. ✅ **Library module** `sieve/ecm/gpu_ecm.{hpp,cu}` — packages the validated
+   stage-1 + stage-2 kernel behind a plain-C++ batch API
+   (`gpu_ecm::factor_batch(moduli, ncurves, B1, B2, factor)` +
+   `gpu_ecm::available()`). Standalone-tested: **1000/1000 moduli cracked, every
+   returned factor divides its modulus.** `gpu_ecm_stub.cpp` is the non-CUDA
+   fallback so the CPU path is unaffected when CUDA is off.
+3. ✅ **CMake CUDA build** — `config/cuda.cmake` (`option(ENABLE_GPU)`,
+   `check_language(CUDA)`, `CUDAToolkit`, default `sm_86`) wired into the `facul`
+   library (`sieve/ecm/CMakeLists.txt`). **Configures cleanly with
+   `-DENABLE_GPU=ON`** (CUDA 13.3 detected; pass `-DCMAKE_CUDA_ARCHITECTURES=86`
+   for the 3090). CPU build is unchanged when the flag is off.
+4. ⏳ **Hook point — the survivor-batch layer, NOT per-relation `facul_all`.**
+   Architectural finding: `facul_all(N, …)` receives the **2 cofactors of one
+   relation** (`N.size()==nsides`), so calling the GPU there gives 2 moduli per
+   launch (poor occupancy). The GPU batch must hook one level up, where many
+   survivors accumulate — the batch path (`sieve/ecm/batch.cpp`) or a new
+   survivor-accumulation buffer in `sieve/las-cofactor.cpp` that flushes to
+   `gpu_ecm::factor_batch` once enough cofactors are queued. Tune batch size vs
+   PCIe latency and the sieve's per-region cadence.
+5. ⏳ **Validate in a live factorization** + retune `ncurves`/`mfb`/B2 to exploit
+   the cheap cofactorization (where the real systemic speedup is realized).
 
 ## Status
 
-- ✅ CUDA 13.3 + RTX 3090 verified end-to-end; CADO has no prior GPU code.
-- ✅ Cofactorization integration point identified (`facul_all`, batch of small
-  cofactors).
-- ✅ **Core thesis validated & measured: ~39× GPU vs 20-core CPU on ECM's modmul
-  primitive, correctness-checked.**
-- ⏳ Full ECM kernel + `facul_all` integration + retuning — large follow-on, all
-  fully testable on this hardware (unlike the AVX-512 track).
+- ✅ CUDA 13.3 + RTX 3090 verified end-to-end; CADO had no prior GPU code.
+- ✅ **Full GPU ECM engine built & validated**: stage-1, Suyama curves, 128-bit
+  modmul, stage-2 BSGS — all bit-exact vs CPU; ~39× modmul throughput vs the
+  20-core CPU.
+- ✅ **Packaged as `sieve/ecm/gpu_ecm` + CMake `ENABLE_GPU` build** that
+  configures cleanly; standalone batch test passes (1000/1000).
+- ⏳ Remaining: hook `factor_batch` into the survivor-batch layer (item 4),
+  full in-CADO CUDA build, and in-factorization validation/retuning — all fully
+  testable on this hardware.

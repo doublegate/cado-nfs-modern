@@ -68,6 +68,16 @@ add_library(facul
 
 mark_targets_as_openmp(facul)
 
+# Optional CUDA GPU ECM cofactorization backend (see config/cuda.cmake). The
+# stub keeps gpu_ecm::available() callable from the CPU path when CUDA is off.
+if(HAVE_GPU_ECM)
+    target_sources(facul PRIVATE gpu_ecm.cu)
+    target_compile_definitions(facul PUBLIC HAVE_GPU_ECM=1)
+    target_link_libraries(facul CUDA::cudart)
+else()
+    target_sources(facul PRIVATE gpu_ecm_stub.cpp)
+endif()
+
 target_link_libraries(facul utils ${gmp_libname})
 
 add_executable(testbench testbench.cpp)

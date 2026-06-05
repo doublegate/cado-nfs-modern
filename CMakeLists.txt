@@ -283,6 +283,9 @@ include(config/gmp_randstate.cmake)
 
 include(config/check_cpu_feature.cmake)
 
+# Optional CUDA GPU ECM cofactorization backend (-DENABLE_GPU=ON).
+include(config/cuda.cmake)
+
 set(GF2X_CONFIGURE_FLAGS)
 
 if (DEFINED ENV{NO_SSE})
