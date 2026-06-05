@@ -69,7 +69,10 @@ add_library(facul
 mark_targets_as_openmp(facul)
 
 # Optional CUDA GPU ECM cofactorization backend (see config/cuda.cmake). The
-# stub keeps gpu_ecm::available() callable from the CPU path when CUDA is off.
+# cxx_mpz<->uint64 survivor-batch bridge (gpu_cofac.cpp) is plain C++ and always
+# built; the stub keeps gpu_ecm::available() callable from the CPU path when
+# CUDA is off.
+target_sources(facul PRIVATE gpu_cofac.cpp)
 if(HAVE_GPU_ECM)
     target_sources(facul PRIVATE gpu_ecm.cu)
     target_compile_definitions(facul PUBLIC HAVE_GPU_ECM=1)

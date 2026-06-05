@@ -77,16 +77,26 @@ backend; the remaining work is integration + refinement.
    library (`sieve/ecm/CMakeLists.txt`). **Configures cleanly with
    `-DENABLE_GPU=ON`** (CUDA 13.3 detected; pass `-DCMAKE_CUDA_ARCHITECTURES=86`
    for the 3090). CPU build is unchanged when the flag is off.
-4. ⏳ **Hook point — the survivor-batch layer, NOT per-relation `facul_all`.**
-   Architectural finding: `facul_all(N, …)` receives the **2 cofactors of one
-   relation** (`N.size()==nsides`), so calling the GPU there gives 2 moduli per
-   launch (poor occupancy). The GPU batch must hook one level up, where many
-   survivors accumulate — the batch path (`sieve/ecm/batch.cpp`) or a new
-   survivor-accumulation buffer in `sieve/las-cofactor.cpp` that flushes to
-   `gpu_ecm::factor_batch` once enough cofactors are queued. Tune batch size vs
-   PCIe latency and the sieve's per-region cadence.
-5. ⏳ **Validate in a live factorization** + retune `ncurves`/`mfb`/B2 to exploit
-   the cheap cofactorization (where the real systemic speedup is realized).
+4. **Survivor-batch hook.** Architectural finding: `facul_all(N, …)` receives the
+   **2 cofactors of one relation**, so the GPU must hook one level up, where
+   survivors already accumulate. CADO 3.0.0 collects all survivors in
+   **`las.survivors.L`** (a `list<(special_q, list<cofac_candidate>)>`, each
+   `cofac_candidate` = `{a, b, vector<cxx_mpz> cofactor}`), drained for
+   cofactoring at `sieve/las.cpp:~997` (batch mode).
+   - ✅ **Bridge done** — `sieve/ecm/gpu_cofac.{hpp,cpp}`: a `cxx_mpz`↔`uint64`
+     survivor-batch flush (`gpu_ecm::cofac_batch(cofactors, ncurves, B1, B2)`)
+     that gathers the eligible single-word cofactors, runs ONE GPU launch, and
+     returns a found factor per cofactor (1 = none → CPU path). Plain C++ (GMP),
+     calls the validated `gpu_ecm::factor_batch`; **syntax-checks clean against
+     CADO headers**; built into the `facul` library.
+   - ⏳ **Drain wiring** — call `cofac_batch` over the drained batch at
+     `las.cpp:~997`, pre-divide each cofactor by its GPU factor, then let the
+     existing per-survivor cofactoring finish the (smaller) remainder so the
+     relation-emission path is unchanged. This is delicate concurrent surgery
+     and must be validated in a live run (next).
+5. ⏳ **Full in-CADO CUDA build + live-factorization validation** (relations
+   identical) + retune `ncurves`/`mfb`/B2 to exploit the cheap cofactorization
+   (where the real systemic speedup is realized).
 
 ## Status
 
