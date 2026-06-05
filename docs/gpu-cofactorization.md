@@ -62,7 +62,10 @@ backend; the remaining work is integration + refinement.
      REDC, validated bit-exact on CPU and GPU over 200 000 trials; the core for
      larger-`mfb` cofactors. Full 128-bit ECM = the validated 64-bit ladder/curve
      structure over this modmul.
-   - ⏳ optional **stage 2** (BSGS) for higher per-curve yield.
+   - ✅ **stage 2 (BSGS continuation)** (`bench/gpu-ecm-stage2.cu`) — baby steps
+     `[r]Q`, giant steps `[mW]Q`, accumulated cross-differences with one final
+     gcd; validated bit-exact GPU vs CPU, and finds **+64% more factors per
+     curve** (1011 → 1663 / 2048 composites at B1=2000, B2=50000).
 2. **Batching layer** behind `facul_all` (`sieve/las-cofactor.cpp` /
    `sieve/ecm/facul.cpp`): accumulate survivors across special-q into a device
    batch, launch the kernel, return factors. Tune batch size vs PCIe latency and
