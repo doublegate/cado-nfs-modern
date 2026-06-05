@@ -60,7 +60,12 @@ include(config/xcode.cmake)
 set(CADO_VERSION_MAJOR  3)
 set(CADO_VERSION_MINOR  0)
 set(CADO_VERSION_PATCHLEVEL 0)
-set(CADO_VERSION_STRING  "${CADO_VERSION_MAJOR}.${CADO_VERSION_MINOR}.${CADO_VERSION_PATCHLEVEL}")
+# This fork carries a "-modern" suffix: same upstream 3.0.0 algorithms/parameters,
+# rebased onto current toolchains (CMake 4.x, GCC 16, Python 3.14) and extended
+# with the performance/orchestration work documented in CHANGELOG.md. The numeric
+# components stay at upstream 3.0.0; only the display string is suffixed.
+set(CADO_VERSION_SUFFIX  "-modern")
+set(CADO_VERSION_STRING  "${CADO_VERSION_MAJOR}.${CADO_VERSION_MINOR}.${CADO_VERSION_PATCHLEVEL}${CADO_VERSION_SUFFIX}")
 
 # CADO_DIST_ARCHIVE_NAME may be overridden by environment.
 set(CADO_DIST_ARCHIVE_NAME "cado-nfs-${CADO_VERSION_STRING}")
