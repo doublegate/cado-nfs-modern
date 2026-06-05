@@ -34,6 +34,7 @@
 #include "las-auxiliary-data.hpp"
 #include "las-cofac-standalone.hpp"
 #include "las-cofactor.hpp"
+#include "ecm/gpu_cofac.hpp"
 #include "las-config.hpp"
 #include "las-coordinates.hpp"
 #include "las-special-q-task-collection.hpp"
@@ -542,6 +543,13 @@ void process_bucket_region_run::cofactoring_sync (survivors_t & survivors)/*{{{*
     int const N = first_region0_index + already_done + bucket_relative_index;
     unsigned char * Sx = S[0] ? S[0] : S[1];
 
+    /* Batched GPU ECM drain (CADO_GPU_ECM=batch): instead of dispatching one
+     * detached_cofac task per survivor, collect this bucket region's async
+     * survivors, run ONE GPU ECM launch over all their leftover cofactors, and
+     * stash a factor hint in each before dispatching. Off by default and never
+     * used on the synchronous descent path. See sieve/las-cofactor.cpp. */
+    const bool gpu_batch = gpu_ecm_batch_enabled();
+    std::vector<cofac_standalone> gpu_pending;
 
     for(const size_t x : survivors) {
         if (ws.task->must_take_decision())
@@ -780,13 +788,17 @@ void process_bucket_region_run::cofactoring_sync (survivors_t & survivors)/*{{{*
             continue; /* we deal with all cofactors at the end of subjob */
         }
 
-        auto * D = new detached_cofac_parameters(wc_p, aux_p, std::move(cur));
-
         /* It is probably not a very good idea to make one task out of
          * _each_ (a,b) pair that is to be cofactored...
          */
 
         if (!dlp_descent && !exit_after_rel_found) {
+            if (gpu_batch) {
+                /* defer: collect for the per-region GPU launch below */
+                gpu_pending.push_back(std::move(cur));
+                continue;
+            }
+            auto * D = new detached_cofac_parameters(wc_p, aux_p, std::move(cur));
             /* We must make sure that we join the async threads at some
              * point, otherwise we'll leak memory. It seems more appropriate
              * to batch-join only, so this is done at the las_subjob level */
@@ -794,6 +806,7 @@ void process_bucket_region_run::cofactoring_sync (survivors_t & survivors)/*{{{*
             worker->get_pool().add_task(detached_cofac, D, N, 1); /* id N, queue 1 */
         } else {
             /* We must proceed synchronously for the descent */
+            auto * D = new detached_cofac_parameters(wc_p, aux_p, std::move(cur));
             std::unique_ptr<detached_cofac_result> res(
                     dynamic_cast<detached_cofac_result*>(
                     detached_cofac(worker, D, N)));
@@ -802,6 +815,37 @@ void process_bucket_region_run::cofactoring_sync (survivors_t & survivors)/*{{{*
                 ws.las.tree->new_candidate_relation(ws.las, ws.task, *res->rel_p);
                 break;
             }
+        }
+    }
+
+    /* Batched GPU ECM drain: one launch over every collected cofactor, then
+     * dispatch the survivors (now carrying a gpu_hint) just like the stock
+     * async path. factor_leftover_norms divides the hint out so facul factors
+     * the smaller remainder. */
+    if (gpu_batch && !gpu_pending.empty()) {
+        std::vector<cxx_mpz> allcof;
+        std::vector<std::pair<size_t, size_t>> pos;   /* (survivor index, side) */
+        for (size_t i = 0; i < gpu_pending.size(); i++)
+            for (size_t side = 0; side < gpu_pending[i].norm.size(); side++) {
+                allcof.push_back(gpu_pending[i].norm[side]);
+                pos.emplace_back(i, side);
+            }
+
+        int nc; unsigned long b1, b2;
+        gpu_ecm_hook_params(nc, b1, b2);
+        std::vector<cxx_mpz> const found =
+            gpu_ecm::cofac_batch(allcof, nc, b1, b2);
+
+        for (size_t k = 0; k < pos.size(); k++) {
+            if (mpz_cmp_ui(found[k], 1) <= 0) continue;
+            cofac_standalone & cur = gpu_pending[pos[k].first];
+            if (cur.gpu_hint.empty()) cur.gpu_hint.resize(cur.norm.size());
+            mpz_set(cur.gpu_hint[pos[k].second], found[k]);
+        }
+
+        for (cofac_standalone & cur : gpu_pending) {
+            auto * D = new detached_cofac_parameters(wc_p, aux_p, std::move(cur));
+            worker->get_pool().add_task(detached_cofac, D, N, 1);
         }
     }
 }/*}}}*/

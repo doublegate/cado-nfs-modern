@@ -109,20 +109,44 @@ backend; the remaining work is integration + refinement.
      cofactoring calls; `salvage` gave +0/−0 (no `MAYBE` give-ups arose). This
      proves the CUDA-enabled `las` offloads real cofactors to the RTX 3090 with
      **zero change to emitted relations**.
-   - ⏳ **Throughput drain (follow-on)** — the per-call hook does one small GPU
-     launch per cofactoring call (launch-latency bound), so it is opt-in for
-     validation, not yet a net speedup. The throughput path is to accumulate
-     queued `cofac_candidates` (`sieve/las-process-bucket-region.cpp:~779`) and
-     issue **one GPU launch per bucket region**, then retune `ncurves`/`mfb`/B2
-     to exploit the cheaper cofactorization (the regime shift, §"What that does").
+   - ✅ **Batched drain implemented** (`CADO_GPU_ECM=batch`) —
+     `cofactoring_sync` (`sieve/las-process-bucket-region.cpp`) now collects a
+     whole bucket region's async survivors, issues **one GPU ECM launch per
+     region** over all their leftover cofactors, and stores a per-side factor
+     hint in `cofac_standalone::gpu_hint`. `factor_leftover_norms` then **divides
+     the hint out** (when it is a prime ≤ 2^lpb) so `facul` factors the smaller
+     remainder, re-attaching the prime so `product==norm` holds. Correctness
+     validated (c120, special-q 600000–603000): **26645 relations vs 17986
+     CPU-only, +8659 extra, −0 lost** — a clean valid superset (the GPU resolves
+     cofactors `facul` would give up on; `bench/gpu-cofac-validate.sh` /
+     `validate-batch`).
+   - ⚠️ **Honest throughput result: not a net win in this regime.** Same c120
+     slice, RTX 3090 + i9-10850K: batch **95 s vs 25 s** wall (`-t 1` and `-t 20`
+     both), i.e. **278 vs 718 rel/s**. Two compounding reasons, both predicted by
+     the Amdahl analysis above: (1) cofactorization is only ~8 % of `las` CPU
+     time, so the offload ceiling is ~8 % even with perfect overlap; (2) the
+     blanket pre-pass runs a full 16-curve, B2=50000 ECM on **every** eligible
+     cofactor — including the majority `facul` cracks in microseconds — so the
+     added GPU work and the +48 % extra relations to emit dominate the small
+     cofactoring saving. (The narrow slice is also fixed-cost/FB-load bound and
+     does not thread-scale, so it understates overlap; but Amdahl caps the win
+     regardless.)
+   - ⏳ **To make it a win** (the real follow-on): (a) **target only hard
+     cofactors** — send to the GPU just the upper-bitsize cofactors near `mfb`
+     where `facul`'s curve budget tends to fail, not the easy ones; (b) the
+     **parameter regime-shift** — raise `mfb`/`ncurves`/add a large prime so
+     cofactoring becomes a large enough CPU fraction to be worth offloading, then
+     re-benchmark; (c) a truly **async GPU stream** so the launch overlaps
+     sieving instead of blocking the region thread.
 5. ✅ **Full in-CADO CUDA build works.** With `-DENABLE_GPU=ON`
    `-DCMAKE_CUDA_ARCHITECTURES=86`, `gpu_ecm.cu` compiles under `nvcc` inside
    CADO's C++20/`-Werror` build (no flag conflicts), `gpu_cofac.cpp` compiles,
    and the **entire suite** (`polyselect`, `las`, `makefb`, `purge`, `merge`,
    `bwc`, `sqrt`, …) builds; `las` links `libcudart` with the
    `gpu_ecm::{available,factor_batch,cofac_batch}` symbols present and the hook
-   live. ⏳ Remaining: the throughput drain (item 4) + `ncurves`/`mfb`/B2
-   retuning.
+   live (per-call `shadow`/`salvage` and the per-region `batch` drain). ⏳
+   Remaining: make `batch` a net win via hard-cofactor targeting + the parameter
+   regime-shift + async overlap (item 4).
 
 ## Status
 
@@ -138,6 +162,10 @@ backend; the remaining work is integration + refinement.
 - ✅ **Relations-identical validated**: GPU `shadow` mode is byte-for-byte
   identical to CPU-only on a real c120 sieve run while splitting 37023 real
   survivor cofactors on the RTX 3090.
-- ⏳ Remaining (throughput): batch the per-bucket-region drain into one GPU
-  launch and retune `ncurves`/`mfb`/B2 — the per-call hook validates correctness
-  but is launch-latency bound, not yet a net speedup.
+- ✅ **Batched per-region drain implemented & validated** (`CADO_GPU_ECM=batch`):
+  one GPU launch per bucket region, hint divided out before `facul`; a clean
+  valid superset (26645 vs 17986 relations, −0 lost on the c120 slice).
+- ⚠️ **Honest throughput finding**: blanket GPU cofactor offload is **not a net
+  win** for c120 on this box (95 s vs 25 s wall; ~8 % Amdahl ceiling, and full
+  ECM on every cofactor costs more than it saves). The path to an actual win is
+  hard-cofactor targeting + the parameter regime-shift + async overlap.

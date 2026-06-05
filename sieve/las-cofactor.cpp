@@ -246,17 +246,28 @@ check_leftover_norm (cxx_mpz const & n, siever_side_config const & scs)
  *            emit extra *valid* relations (a superset of the CPU-only output),
  *            never wrong ones (the product==norm invariant is preserved).
  *
+ *   batch    (CADO_GPU_ECM=batch) -- the THROUGHPUT path. The GPU does not run
+ *            here per call; instead cofactoring_sync collects a whole bucket
+ *            region's survivors, issues ONE GPU ECM launch over all their
+ *            leftover cofactors, and stores a factor hint in each
+ *            cofac_standalone::gpu_hint. factor_leftover_norms then DIVIDES the
+ *            hint out (when it is a prime <= lpb) so facul factors the smaller
+ *            remainder -- moving the ECM work to the GPU and freeing CPU. The
+ *            hinted prime is re-attached afterwards, so product==norm holds.
+ *            Like salvage this yields a valid *superset* (facul may now resolve
+ *            a cofactor it would have given up on), never a wrong relation.
+ *
  * Because relation::compress() sorts each side's primes, and integer
  * factorization is unique, the discovery method cannot change a relation's
  * text -- only whether a give-up becomes a (valid) relation. That is why
- * shadow mode is byte-identical and salvage mode is a clean superset.
+ * shadow mode is byte-identical and salvage/batch modes are a clean superset.
  *
- * Note: a 2-element launch per cofactoring call has GPU-launch latency, so the
- * hook is opt-in and meant for correctness validation; the throughput path is
- * the batched survivor-list drain documented in docs/gpu-cofactorization.md.
+ * Note: the per-call shadow/salvage launch has GPU-launch latency (one tiny
+ * launch per cofactoring call), so those modes are for correctness validation;
+ * batch mode is the one intended to be a net speedup.
  */
 namespace {
-    enum class gpu_ecm_mode { off, shadow, salvage };
+    enum class gpu_ecm_mode { off, shadow, salvage, batch };
 
     /* GPU ECM curve budget for the hook (matches the validated bench kernels). */
     constexpr int           GPU_HOOK_NCURVES = 16;
@@ -268,8 +279,12 @@ namespace {
         const char * e = getenv("CADO_GPU_ECM");
         if (e == nullptr || *e == '\0')        return gpu_ecm_mode::off;
         if (strcmp(e, "salvage") == 0)         return gpu_ecm_mode::salvage;
+        if (strcmp(e, "batch") == 0)           return gpu_ecm_mode::batch;
         return gpu_ecm_mode::shadow;           /* "1", "shadow", anything else */
     }
+
+    /* parsed once, shared by the per-call hook and the batched drain */
+    const gpu_ecm_mode g_gpu_mode = gpu_ecm_mode_from_env();
 
     struct gpu_hook_stats {
         std::atomic<unsigned long> calls{0};   /* factor_leftover_norms calls hooked */
@@ -330,22 +345,63 @@ namespace {
 } // anonymous namespace
 /* }}} */
 
+bool gpu_ecm_batch_enabled()
+{
+    return g_gpu_mode == gpu_ecm_mode::batch && gpu_ecm::available();
+}
+
+void gpu_ecm_hook_params(int & ncurves, unsigned long & B1, unsigned long & B2)
+{
+    ncurves = GPU_HOOK_NCURVES;
+    B1 = GPU_HOOK_B1;
+    B2 = GPU_HOOK_B2;
+}
+
 facul_status factor_leftover_norms(
         std::vector<cxx_mpz> const & n,
         std::vector<std::vector<cxx_mpz>> & factors,
         std::vector<unsigned long> const & Bs,
-        facul_strategies const & strat)
+        facul_strategies const & strat,
+        std::vector<cxx_mpz> const & gpu_hint)
 {
     ASSERT_ALWAYS(Bs.size() == strat.B.size());
     ASSERT_ALWAYS(std::ranges::equal(Bs, strat.B));
 
-    /* call the facul library */
-    auto fac = facul_all(n, strat);
+    /* Batched GPU drain (CADO_GPU_ECM=batch): if the per-bucket-region GPU ECM
+     * pre-pass left a prime factor hint for a side, divide it out so facul
+     * factors the smaller remainder; we re-attach the prime afterwards. Only a
+     * prime <= 2^lpb is used (leaving anything else in keeps facul's verdict
+     * correct). This is the work-saving path; it yields a valid superset. */
+    std::vector<cxx_mpz> work;                 /* remainders fed to facul */
+    std::vector<cxx_mpz> reattach(n.size());   /* prime to prepend per side, or 0 */
+    bool any_hint = false;
+    for (auto & r : reattach) mpz_set_ui(r, 0);
+    if (!gpu_hint.empty()) {
+        work = n;                              /* copy; mutate the hinted sides */
+        for (size_t s = 0; s < n.size() && s < gpu_hint.size(); s++) {
+            cxx_mpz const & f = gpu_hint[s];
+            if (mpz_cmp_ui(f, 1) <= 0) continue;          /* no hint */
+            if (!mpz_divisible_p(n[s], f)) continue;      /* stale/paranoia */
+            if (mpz_sizeinbase(f, 2) <= strat.lpb[s]
+                && mpz_probab_prime_p(f, 25))
+            {
+                mpz_divexact(work[s], n[s], f);
+                mpz_set(reattach[s], f);
+                any_hint = true;
+                gpu_stats.split.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+        if (any_hint) gpu_stats.calls.fetch_add(1, std::memory_order_relaxed);
+    }
 
-    /* optional GPU ECM hook (default OFF; see CADO_GPU_ECM above) */
-    static const gpu_ecm_mode gpu_mode = gpu_ecm_mode_from_env();
-    if (gpu_mode != gpu_ecm_mode::off && gpu_ecm::available())
-        gpu_ecm_cofactor_hook(n, fac, strat, gpu_mode);
+    /* call the facul library (on the reduced remainders when hinted) */
+    auto fac = facul_all(any_hint ? work : n, strat);
+
+    /* per-call GPU hook (shadow/salvage) only when NOT using a batch hint */
+    if (!any_hint && (g_gpu_mode == gpu_ecm_mode::shadow
+                      || g_gpu_mode == gpu_ecm_mode::salvage)
+            && gpu_ecm::available())
+        gpu_ecm_cofactor_hook(n, fac, strat, g_gpu_mode);
 
     for(auto const & f : fac) {
         if (f.status == FACUL_NOT_SMOOTH)
@@ -366,6 +422,10 @@ facul_status factor_leftover_norms(
              */
             return FACUL_MAYBE;
         }
+        /* re-attach the GPU-divided prime so the side's factorization (and the
+         * product==norm invariant below) is complete */
+        if (mpz_cmp_ui(reattach[side], 0) > 0)
+            f.primes.push_back(reattach[side]);
 #ifndef NDEBUG
         cxx_mpz z = 1;
         for(auto const & p : f.primes)

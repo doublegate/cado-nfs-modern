@@ -58,11 +58,22 @@ public:
 
 int check_leftover_norm (cxx_mpz const & n, siever_side_config const & sc);
 
+/* True when the batched per-bucket-region GPU ECM drain is requested
+ * (CADO_GPU_ECM=batch) and a CUDA GPU is available. When true, cofactoring_sync
+ * collects survivors, runs one GPU ECM launch per bucket region, and stores a
+ * factor hint in each cofac_standalone::gpu_hint for factor_leftover_norms to
+ * divide out. Default false -> stock per-survivor path, unchanged. */
+bool gpu_ecm_batch_enabled();
+
+/* GPU ECM curve budget used by both the per-call hook and the batched drain. */
+void gpu_ecm_hook_params(int & ncurves, unsigned long & B1, unsigned long & B2);
+
 facul_status factor_leftover_norms(
         std::vector<cxx_mpz> const & norms,
         std::vector<std::vector<cxx_mpz>> &,
         std::vector<unsigned long> const &,
-        facul_strategies const &);
+        facul_strategies const &,
+        std::vector<cxx_mpz> const & gpu_hint = {});
 
 /* handy shortcut. Can't have it defined at the facul.hpp level because
  * facul does not know about las stuff. */
