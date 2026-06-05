@@ -10,7 +10,48 @@
 > [`docs/gpu-cofactorization.md`](docs/gpu-cofactorization.md) /
 > [`docs/rust-orchestration.md`](docs/rust-orchestration.md) for the deep-dives.
 > The earlier 2.3.0-based release (`2.3.1-modern`) is preserved under the
-> `v2.3.1-modern` tag. Everything below is upstream's own README.
+> `v2.3.1-modern` tag. A short fork **Performance** section follows; everything
+> after it is upstream's own README.
+
+## Performance
+
+Reference timings factoring balanced (RSA-like) semiprimes on an
+**Intel i9-10850K (10 cores / 20 threads), 64 GiB RAM, CachyOS**, GCC 16.1.1
+`-O3 -march=native`, GMP 6.3.0, all 20 threads. Same seeded inputs as the prior
+`2.3.1-modern` benchmarks. Every result was verified (factors multiply back to
+the input and are prime).
+
+| Digits | Bits | Wall time | CADO CPU | Parallel | vs 2.3.1-modern (CPU) |
+|-------:|-----:|----------:|---------:|---------:|----------------------:|
+| 60 | ~199 | 19.2 s | 40.0 s | 2.1× | −31 % |
+| 70 | ~232 | 26.0 s | 87.5 s | 3.4× | −28 % |
+| 80 | ~265 | 70.3 s | 379.1 s | 5.4× | −32 % |
+| 90 | ~299 | 184.5 s | 1465.0 s | 8.0× | −25 % |
+
+**Key findings**
+
+- **Total CPU work is down ~25-32 %** vs the 2.3.0-based fork on identical
+  inputs — mostly from upstream 3.0.0's Bouvier–Imbert batch cofactorization
+  (eprint 2018/669) and `I>16` sieving, plus this fork's `-O3 -march=native`
+  (~7 % on the siever). This is the robust, repeatable signal; wall-time gains
+  shrink with size and fall inside the ±15-20 % polyselect noise by c90.
+- **Parallel efficiency *drops* (e.g. c90 11.1×→8.0×) as a consequence of the
+  CPU reduction**, not a regression: less embarrassingly-parallel sieve work
+  makes the sequential phases (linear algebra, square root, orchestration) a
+  larger fraction of the run.
+- **Sieving dominates** (45-74 % of CPU) and is the parallel phase; **linear
+  algebra grows the fastest** (~110× c60→c90) and is the emerging second
+  bottleneck — the classic NFS trade-off. Wall-time roughly doubles per +10
+  digits, consistent with the sub-exponential `L(1/3)` complexity of NFS.
+- **Practical envelope on this desktop:** ≤c75 interactive · c80-c95 a few
+  minutes · ~c100 ≈ 10 min · ~c110 ≈ 1 hr · ≥c130 wants distributed mode.
+  Comfortable single-session ceiling ≈ **c105-c110**.
+
+Full methodology, per-phase breakdown, the 2.3.1→3.0.0 comparison, projections,
+and seeded reproducible inputs: [**`BENCHMARKS.md`**](BENCHMARKS.md). The GPU and
+Rust deep-dives are in [`docs/`](docs/).
+
+---
 
 The main page of the Cado-NFS source code is
 [https://gitlab.inria.fr/cado-nfs/cado-nfs](https://gitlab.inria.fr/cado-nfs/cado-nfs).

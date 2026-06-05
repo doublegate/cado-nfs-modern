@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Upstream CADO-NFS (algorithms, features, releases, support)
+    url: https://gitlab.inria.fr/cado-nfs/cado-nfs
+    about: For NFS algorithm/math questions beyond this fork's modernization + performance scope, please use the official project.
+  - name: Upstream homepage
+    url: http://cado-nfs.inria.fr/
+    about: Documentation and background on CADO-NFS and the Number Field Sieve.

@@ -9,3 +9,10 @@ __pycache__/
 
 # Rust build output
 /rust/target/
+
+# Local Claude Code tooling and private per-project notes (never committed)
+/.claude/
+/CLAUDE.local.md
+
+# Local Python venv for the 3.0.0 orchestrator (created by scripts/setup-venv.sh)
+/cado-nfs.venv/

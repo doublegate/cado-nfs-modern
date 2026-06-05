@@ -1,0 +1,78 @@
+name: CI
+
+# Build CADO-NFS 3.0.0-modern on current toolchains and prove it factors a
+# number end-to-end. This validates the modernization patches and the 3.0.0
+# base (C++20, CMake >= 3.18, the Flask/requests orchestrator) on stock GitHub
+# runners. GCC >= 10 is required by 3.0.0, so ubuntu-22.04 (gcc-11) and
+# ubuntu-24.04 (gcc-13) both qualify.
+
+on:
+  push:
+    branches: [main, master, v3-modern]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-factor:
+    name: build + smoke factor (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake libgmp-dev libhwloc-dev \
+            python3 python3-venv python3-pip perl
+
+      - name: Tool versions
+        run: |
+          gcc --version | head -1
+          cmake --version | head -1
+          python3 --version
+          echo "GMP: $(dpkg -s libgmp-dev 2>/dev/null | sed -n 's/^Version: //p')"
+
+      # 3.0.0 needs the Python flask/requests modules at CONFIGURE time, and the
+      # committed local.sh points cmake at $PWD/cado-nfs.venv. Create it first.
+      - name: Set up Python venv (orchestrator deps)
+        run: bash scripts/setup-venv.sh
+
+      - name: Build
+        run: make -j"$(nproc)"
+
+      - name: Unit tests (fast subset)
+        run: |
+          cd "build/$(hostname)"
+          ctest --output-on-failure -R 'test_bitlinalg|sievetest_I|numbertheory'
+
+      - name: Smoke factorization (59-digit)
+        run: |
+          # cado-nfs.py drives the Flask server + clients, so it must run under
+          # the venv python that has flask/requests installed.
+          PY=cado-nfs.venv/bin/python3
+          OUT=$("$PY" ./cado-nfs.py 90377629292003121684002147101760858109247336549001090677693 -t 2)
+          echo "Factors: $OUT"
+          python3 - "$OUT" <<'PY'
+          import sys
+          N = 90377629292003121684002147101760858109247336549001090677693
+          factors = [int(x) for x in sys.argv[1].split()]
+          prod = 1
+          for f in factors:
+              prod *= f
+          assert prod == N, f"product {prod} != N {N}"
+          assert all(pow(2, f - 1, f) == 1 for f in factors), "a factor is composite"
+          print(f"OK: {len(factors)} prime factors, product == N")
+          PY
