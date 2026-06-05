@@ -823,10 +823,15 @@ void process_bucket_region_run::cofactoring_sync (survivors_t & survivors)/*{{{*
      * async path. factor_leftover_norms divides the hint out so facul factors
      * the smaller remainder. */
     if (gpu_batch && !gpu_pending.empty()) {
+        /* hard-cofactor targeting: skip cofactors below the bit threshold --
+         * facul cracks those cheaply, so a GPU launch for them is pure overhead */
+        const unsigned int minbits = gpu_ecm_min_cofactor_bits();
         std::vector<cxx_mpz> allcof;
         std::vector<std::pair<size_t, size_t>> pos;   /* (survivor index, side) */
         for (size_t i = 0; i < gpu_pending.size(); i++)
             for (size_t side = 0; side < gpu_pending[i].norm.size(); side++) {
+                if (mpz_sizeinbase(gpu_pending[i].norm[side], 2) < minbits)
+                    continue;
                 allcof.push_back(gpu_pending[i].norm[side]);
                 pos.emplace_back(i, side);
             }

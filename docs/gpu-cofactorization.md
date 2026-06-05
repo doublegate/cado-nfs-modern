@@ -120,24 +120,42 @@ backend; the remaining work is integration + refinement.
      CPU-only, +8659 extra, −0 lost** — a clean valid superset (the GPU resolves
      cofactors `facul` would give up on; `bench/gpu-cofac-validate.sh` /
      `validate-batch`).
-   - ⚠️ **Honest throughput result: not a net win in this regime.** Same c120
-     slice, RTX 3090 + i9-10850K: batch **95 s vs 25 s** wall (`-t 1` and `-t 20`
-     both), i.e. **278 vs 718 rel/s**. Two compounding reasons, both predicted by
-     the Amdahl analysis above: (1) cofactorization is only ~8 % of `las` CPU
-     time, so the offload ceiling is ~8 % even with perfect overlap; (2) the
-     blanket pre-pass runs a full 16-curve, B2=50000 ECM on **every** eligible
-     cofactor — including the majority `facul` cracks in microseconds — so the
-     added GPU work and the +48 % extra relations to emit dominate the small
-     cofactoring saving. (The narrow slice is also fixed-cost/FB-load bound and
-     does not thread-scale, so it understates overlap; but Amdahl caps the win
-     regardless.)
-   - ⏳ **To make it a win** (the real follow-on): (a) **target only hard
-     cofactors** — send to the GPU just the upper-bitsize cofactors near `mfb`
-     where `facul`'s curve budget tends to fail, not the easy ones; (b) the
-     **parameter regime-shift** — raise `mfb`/`ncurves`/add a large prime so
-     cofactoring becomes a large enough CPU fraction to be worth offloading, then
-     re-benchmark; (c) a truly **async GPU stream** so the launch overlaps
-     sieving instead of blocking the region thread.
+   - ⚙️ **Tunable targeting** (`CADO_GPU_MINBITS`, `CADO_GPU_NCURVES`,
+     `CADO_GPU_B1`, `CADO_GPU_B2`): only cofactors with ≥ `MINBITS` bits are sent
+     to the GPU (the easy ones facul cracks in microseconds are left on the CPU),
+     and the curve budget is set per regime — all without recompiling.
+   - ⚠️ **Honest throughput result: GPU cofactor offload cannot win on c120 on
+     this box.** Measured three ways (RTX 3090 + i9-10850K):
+     - **The ceiling is intrinsic, ~7.5 %.** `las`'s own breakdown on c120
+       (`random-sample 300`): `Total cpu 33.2 s [… sieving 24.6, factor 2.5 …]`
+       — cofactoring is **2.5 / 33 ≈ 7.5 %** of CPU. Even a *free*, perfectly
+       overlapped GPU offload caps the speedup at ~7.5 %.
+     - **Targeting helps but cannot reach the bar.** Sweep at `-t 20`,
+       `random-sample 300` (`bench/gpu-cofac-batch-bench.sh` style), `off`
+       baseline **657 rel/wall**: blanket `MINBITS=0` → 264; `MINBITS=50` → 307;
+       `MINBITS=54` → **436**. Targeting cut batch wall 122 s → 56 s, but the
+       per-bucket-region synchronous launch overhead (most regions have 0–1
+       qualifying cofactors yet pay a full GPU round-trip) plus the +12–48 %
+       extra relations still leave it below `off`.
+     - **The regime-shift lever is a no-op on c120.** `-ncurves 4` vs
+       `-ncurves 100` leaves `factor` at 0.3 s either way — c120 cofactors are
+       small (≤ `mfb` = 52/54 bit) and crack in a few curves, so raising the
+       cofactoring effort does **not** make it a larger CPU fraction. There is no
+       c120 knob that lifts cofactoring above ~8 %.
+     - **`-t` did not multi-thread this workload** (`threadpool of 1 threads`),
+       so CPU/GPU overlap could not be exercised — but the ~7.5 % ceiling caps
+       the win regardless of overlap.
+   - ⏳ **Where it *would* win (scoped follow-on).** A regime where cofactoring
+     is a large CPU fraction needs **substantially larger cofactors** — a c140+
+     composite and/or a much higher `mfb` so survivors carry genuinely hard
+     (≫ 64-bit) cofactors that cost many CPU ECM curves. That requires
+     integrating the **128-bit GPU ECM path** (already validated standalone in
+     `bench/gpu-mont128.cu`) into `gpu_ecm::cofac_batch` (today's bridge is the
+     64-bit `< 2^62` path), plus reducing launch count (accumulate cofactors
+     across bucket regions / per-thread CUDA streams) and real `-t N` threading
+     for overlap. The infrastructure here (validated, correct, tunable, behind a
+     flag) is the foundation for that; the win itself is gated on the 128-bit
+     integration and a larger target number, and is Amdahl-bounded even then.
 5. ✅ **Full in-CADO CUDA build works.** With `-DENABLE_GPU=ON`
    `-DCMAKE_CUDA_ARCHITECTURES=86`, `gpu_ecm.cu` compiles under `nvcc` inside
    CADO's C++20/`-Werror` build (no flag conflicts), `gpu_cofac.cpp` compiles,
@@ -165,7 +183,12 @@ backend; the remaining work is integration + refinement.
 - ✅ **Batched per-region drain implemented & validated** (`CADO_GPU_ECM=batch`):
   one GPU launch per bucket region, hint divided out before `facul`; a clean
   valid superset (26645 vs 17986 relations, −0 lost on the c120 slice).
-- ⚠️ **Honest throughput finding**: blanket GPU cofactor offload is **not a net
-  win** for c120 on this box (95 s vs 25 s wall; ~8 % Amdahl ceiling, and full
-  ECM on every cofactor costs more than it saves). The path to an actual win is
-  hard-cofactor targeting + the parameter regime-shift + async overlap.
+- ⚠️ **Honest throughput finding**: GPU cofactor offload **cannot win on c120**
+  on this box. Cofactoring is intrinsically ~7.5 % of CPU (measured from `las`'s
+  own breakdown) and **no knob raises it** — `-ncurves 4` vs `100` leaves
+  `factor` at 0.3 s, because c120's small cofactors crack in a few curves.
+  Hard-cofactor targeting (`CADO_GPU_MINBITS`) cut batch wall 122 s → 56 s but
+  still trails CPU-only (436 vs 657 rel/wall). A real win needs a c140+ / high-
+  `mfb` regime where cofactors are genuinely hard, which requires integrating the
+  validated **128-bit GPU ECM path** into `cofac_batch` — Amdahl-bounded even
+  then. The infrastructure (correct, tunable, flag-gated) is the foundation.

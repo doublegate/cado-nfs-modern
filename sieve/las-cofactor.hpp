@@ -68,6 +68,12 @@ bool gpu_ecm_batch_enabled();
 /* GPU ECM curve budget used by both the per-call hook and the batched drain. */
 void gpu_ecm_hook_params(int & ncurves, unsigned long & B1, unsigned long & B2);
 
+/* Hard-cofactor targeting: only cofactors with at least this many bits are sent
+ * to the GPU (CADO_GPU_MINBITS, default 0 = all eligible). Smaller cofactors,
+ * which facul cracks in microseconds, are left on the CPU to avoid paying GPU
+ * cost for work that was already cheap. */
+unsigned int gpu_ecm_min_cofactor_bits();
+
 facul_status factor_leftover_norms(
         std::vector<cxx_mpz> const & norms,
         std::vector<std::vector<cxx_mpz>> &,

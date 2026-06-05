@@ -269,10 +269,27 @@ check_leftover_norm (cxx_mpz const & n, siever_side_config const & scs)
 namespace {
     enum class gpu_ecm_mode { off, shadow, salvage, batch };
 
-    /* GPU ECM curve budget for the hook (matches the validated bench kernels). */
-    constexpr int           GPU_HOOK_NCURVES = 16;
-    constexpr unsigned long GPU_HOOK_B1      = 2000;
-    constexpr unsigned long GPU_HOOK_B2      = 50000;
+    /* GPU ECM curve budget + targeting, all env-tunable so the throughput regime
+     * can be swept without recompiling (see docs/gpu-cofactorization.md):
+     *   CADO_GPU_NCURVES  curves per cofactor on the GPU      (default 16)
+     *   CADO_GPU_B1 / _B2 ECM stage-1 / stage-2 bounds        (default 2000/50000)
+     *   CADO_GPU_MINBITS  hard-cofactor targeting: only cofactors with at least
+     *                     this many bits are sent to the GPU; smaller ones are
+     *                     left to facul, which cracks them in microseconds and
+     *                     would only be slowed by GPU-launch overhead (default 0
+     *                     = every eligible cofactor, the blanket behaviour). */
+    long env_long(const char * name, long dflt)
+    {
+        const char * e = getenv(name);
+        if (e == nullptr || *e == '\0') return dflt;
+        char * end = nullptr;
+        long const v = strtol(e, &end, 10);
+        return (end == e) ? dflt : v;
+    }
+    const int           GPU_HOOK_NCURVES = (int) env_long("CADO_GPU_NCURVES", 16);
+    const unsigned long GPU_HOOK_B1      = (unsigned long) env_long("CADO_GPU_B1", 2000);
+    const unsigned long GPU_HOOK_B2      = (unsigned long) env_long("CADO_GPU_B2", 50000);
+    const unsigned int  GPU_HOOK_MINBITS = (unsigned int) env_long("CADO_GPU_MINBITS", 0);
 
     gpu_ecm_mode gpu_ecm_mode_from_env()
     {
@@ -355,6 +372,11 @@ void gpu_ecm_hook_params(int & ncurves, unsigned long & B1, unsigned long & B2)
     ncurves = GPU_HOOK_NCURVES;
     B1 = GPU_HOOK_B1;
     B2 = GPU_HOOK_B2;
+}
+
+unsigned int gpu_ecm_min_cofactor_bits()
+{
+    return GPU_HOOK_MINBITS;
 }
 
 facul_status factor_leftover_norms(
