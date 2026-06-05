@@ -3,8 +3,11 @@
 #include <cinttypes>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
+#include <cstdio>
 
 #include <algorithm>
+#include <atomic>
 #include <vector>
 
 #include "arith/modredc_15ul.h"
@@ -12,6 +15,8 @@
 #include "arith/modredc_ul.h"
 #include "ecm/facul.hpp"
 #include "ecm/facul_strategies.hpp"
+#include "ecm/gpu_cofac.hpp"
+#include "ecm/gpu_ecm.hpp"
 #include "las-cofactor.hpp"
 #include "macros.h"
 #include "params.hpp"
@@ -221,6 +226,110 @@ check_leftover_norm (cxx_mpz const & n, siever_side_config const & scs)
   cofactors were smooth. Currently, it is not taken into account by this method.
 */
 
+/* {{{ Optional GPU ECM cofactorization hook (Phase 3, this fork).
+ *
+ * Default OFF. Enabled by the CADO_GPU_ECM environment variable when a CUDA
+ * GPU is present (gpu_ecm::available()); it runs the validated GPU ECM batch
+ * (sieve/ecm/gpu_ecm.cu, via the cxx_mpz<->uint64 bridge gpu_cofac.cpp) over
+ * the leftover cofactors that facul has just processed. Two modes:
+ *
+ *   shadow   (CADO_GPU_ECM=1 | shadow, the default when set) -- IDENTITY
+ *            PRESERVING. The GPU result is only used to verify, on real CADO
+ *            cofactors, that GPU ECM finds a dividing factor; facul's verdict
+ *            is never changed, so the emitted relation set is byte-for-byte
+ *            identical to the CPU-only path. This is the safe validation hook.
+ *
+ *   salvage  (CADO_GPU_ECM=salvage) -- retries facul give-ups (FACUL_MAYBE)
+ *            with GPU ECM. It NEVER overrides a definitive SMOOTH/NOT_SMOOTH
+ *            verdict; it only completes a give-up when the GPU fully splits the
+ *            cofactor into two primes within the large-prime bound. This can
+ *            emit extra *valid* relations (a superset of the CPU-only output),
+ *            never wrong ones (the product==norm invariant is preserved).
+ *
+ * Because relation::compress() sorts each side's primes, and integer
+ * factorization is unique, the discovery method cannot change a relation's
+ * text -- only whether a give-up becomes a (valid) relation. That is why
+ * shadow mode is byte-identical and salvage mode is a clean superset.
+ *
+ * Note: a 2-element launch per cofactoring call has GPU-launch latency, so the
+ * hook is opt-in and meant for correctness validation; the throughput path is
+ * the batched survivor-list drain documented in docs/gpu-cofactorization.md.
+ */
+namespace {
+    enum class gpu_ecm_mode { off, shadow, salvage };
+
+    /* GPU ECM curve budget for the hook (matches the validated bench kernels). */
+    constexpr int           GPU_HOOK_NCURVES = 16;
+    constexpr unsigned long GPU_HOOK_B1      = 2000;
+    constexpr unsigned long GPU_HOOK_B2      = 50000;
+
+    gpu_ecm_mode gpu_ecm_mode_from_env()
+    {
+        const char * e = getenv("CADO_GPU_ECM");
+        if (e == nullptr || *e == '\0')        return gpu_ecm_mode::off;
+        if (strcmp(e, "salvage") == 0)         return gpu_ecm_mode::salvage;
+        return gpu_ecm_mode::shadow;           /* "1", "shadow", anything else */
+    }
+
+    struct gpu_hook_stats {
+        std::atomic<unsigned long> calls{0};   /* factor_leftover_norms calls hooked */
+        std::atomic<unsigned long> split{0};   /* cofactors GPU returned a factor for */
+        std::atomic<unsigned long> salvaged{0};/* FACUL_MAYBE upgraded to SMOOTH */
+        ~gpu_hook_stats() {
+            unsigned long const c = calls.load();
+            if (c)
+                fprintf(stderr,
+                    "# GPU ECM cofac hook: %lu calls, %lu cofactors split by GPU,"
+                    " %lu MAYBE salvaged\n",
+                    c, split.load(), salvaged.load());
+        }
+    };
+    gpu_hook_stats gpu_stats;
+
+    void gpu_ecm_cofactor_hook(std::vector<cxx_mpz> const & n,
+                               std::vector<facul_result> & fac,
+                               facul_strategies const & strat,
+                               gpu_ecm_mode mode)
+    {
+        gpu_stats.calls.fetch_add(1, std::memory_order_relaxed);
+
+        /* one batched GPU launch over this call's cofactors (eligible ones,
+         * i.e. a single odd word < 2^62, are processed; the rest return 1). */
+        std::vector<cxx_mpz> const found =
+            gpu_ecm::cofac_batch(n, GPU_HOOK_NCURVES, GPU_HOOK_B1, GPU_HOOK_B2);
+
+        for (size_t s = 0; s < n.size(); s++) {
+            if (mpz_cmp_ui(found[s], 1) <= 0) continue;     /* GPU found nothing */
+            if (!mpz_divisible_p(n[s], found[s])) continue; /* paranoia */
+            gpu_stats.split.fetch_add(1, std::memory_order_relaxed);
+
+            if (mode == gpu_ecm_mode::shadow)
+                continue;                       /* identity-preserving: only count */
+
+            /* salvage: act only on a facul give-up, never override a verdict */
+            if (fac[s].status != FACUL_MAYBE) continue;
+
+            cxx_mpz g;
+            mpz_divexact(g, n[s], found[s]);
+            unsigned int const lpb = strat.lpb[s];
+            /* complete a give-up only when GPU fully splits it into two primes
+             * within the large-prime bound -> a genuine smooth relation. */
+            if (mpz_sizeinbase(found[s], 2) <= lpb
+                && mpz_sizeinbase(g, 2) <= lpb
+                && mpz_probab_prime_p(found[s], 25)
+                && mpz_probab_prime_p(g, 25))
+            {
+                fac[s].status = FACUL_SMOOTH;
+                fac[s].primes.clear();
+                fac[s].primes.push_back(found[s]);
+                fac[s].primes.push_back(g);
+                gpu_stats.salvaged.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+    }
+} // anonymous namespace
+/* }}} */
+
 facul_status factor_leftover_norms(
         std::vector<cxx_mpz> const & n,
         std::vector<std::vector<cxx_mpz>> & factors,
@@ -232,6 +341,12 @@ facul_status factor_leftover_norms(
 
     /* call the facul library */
     auto fac = facul_all(n, strat);
+
+    /* optional GPU ECM hook (default OFF; see CADO_GPU_ECM above) */
+    static const gpu_ecm_mode gpu_mode = gpu_ecm_mode_from_env();
+    if (gpu_mode != gpu_ecm_mode::off && gpu_ecm::available())
+        gpu_ecm_cofactor_hook(n, fac, strat, gpu_mode);
+
     for(auto const & f : fac) {
         if (f.status == FACUL_NOT_SMOOTH)
             return FACUL_NOT_SMOOTH;

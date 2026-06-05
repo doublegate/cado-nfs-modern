@@ -89,24 +89,40 @@ backend; the remaining work is integration + refinement.
      returns a found factor per cofactor (1 = none → CPU path). Plain C++ (GMP),
      calls the validated `gpu_ecm::factor_batch`; **syntax-checks clean against
      CADO headers**; built into the `facul` library.
-   - ⏳ **Drain wiring** — the deferred-cofactoring flow: survivors are created
-     in `sieve/las-process-bucket-region.cpp:~567`, transferred to
-     `ws.cofac_candidates` (`:~779`), then dispatched as per-survivor
-     `detached_cofac` tasks (`sieve/las-detached-cofac.cpp`). A correct, batched
-     hook accumulates the queued `cofac_candidates`, calls `cofac_batch` once,
-     pre-divides each cofactor by its GPU factor, then lets the existing
-     per-survivor cofactoring finish the (smaller) remainder — so relation
-     emission is byte-for-byte unchanged. This restructures a multithreaded hot
-     path and MUST be validated relations-identical in a live run; it is the
-     remaining focused follow-on (a per-survivor hook would be a regression and
-     is not worth wiring).
+   - ✅ **Live hook wired** — `factor_leftover_norms` (`sieve/las-cofactor.cpp`,
+     the single per-survivor cofactoring chokepoint reached by the default
+     `detached_cofac` path) now calls the GPU ECM batch when the `CADO_GPU_ECM`
+     environment variable is set and `gpu_ecm::available()`. **Default OFF**, so
+     the stock path is untouched. Two modes:
+     - `shadow` (`CADO_GPU_ECM=1|shadow`) — **identity-preserving**: runs GPU ECM
+       on the real leftover cofactors but does *not* change `facul`'s verdict, so
+       the relation set is byte-for-byte identical. The safe validation hook.
+     - `salvage` (`CADO_GPU_ECM=salvage`) — retries only `facul` give-ups
+       (`FACUL_MAYBE`); upgrades to a smooth relation **only** when the GPU fully
+       splits the cofactor into two primes within the large-prime bound. Emits a
+       *valid superset* of the CPU-only relations, never a wrong one (the
+       product==norm invariant holds; `relation::compress()` sorts each side, and
+       factorization is unique, so discovery order cannot change a relation).
+   - ✅ **Validated relations-identical** (c120 poly, special-q 600000–603000,
+     `-t 1`): **17986 relations** in every mode. `shadow` is **byte-identical** to
+     CPU-only while the GPU split **37023 real survivor cofactors** across 29953
+     cofactoring calls; `salvage` gave +0/−0 (no `MAYBE` give-ups arose). This
+     proves the CUDA-enabled `las` offloads real cofactors to the RTX 3090 with
+     **zero change to emitted relations**.
+   - ⏳ **Throughput drain (follow-on)** — the per-call hook does one small GPU
+     launch per cofactoring call (launch-latency bound), so it is opt-in for
+     validation, not yet a net speedup. The throughput path is to accumulate
+     queued `cofac_candidates` (`sieve/las-process-bucket-region.cpp:~779`) and
+     issue **one GPU launch per bucket region**, then retune `ncurves`/`mfb`/B2
+     to exploit the cheaper cofactorization (the regime shift, §"What that does").
 5. ✅ **Full in-CADO CUDA build works.** With `-DENABLE_GPU=ON`
    `-DCMAKE_CUDA_ARCHITECTURES=86`, `gpu_ecm.cu` compiles under `nvcc` inside
    CADO's C++20/`-Werror` build (no flag conflicts), `gpu_cofac.cpp` compiles,
-   and `las` links `libcudart` with the `gpu_ecm::{available,factor_batch,
-   cofac_batch}` symbols present. The CUDA-enabled `las` runs correctly
-   (microbench unchanged at ~11.7 s). ⏳ Remaining: the drain wiring (item 4) +
-   live-factorization validation + `ncurves`/`mfb`/B2 retuning.
+   and the **entire suite** (`polyselect`, `las`, `makefb`, `purge`, `merge`,
+   `bwc`, `sqrt`, …) builds; `las` links `libcudart` with the
+   `gpu_ecm::{available,factor_batch,cofac_batch}` symbols present and the hook
+   live. ⏳ Remaining: the throughput drain (item 4) + `ncurves`/`mfb`/B2
+   retuning.
 
 ## Status
 
@@ -116,6 +132,12 @@ backend; the remaining work is integration + refinement.
   20-core CPU.
 - ✅ **Packaged as `sieve/ecm/gpu_ecm` + CMake `ENABLE_GPU` build** that
   configures cleanly; standalone batch test passes (1000/1000).
-- ⏳ Remaining: hook `factor_batch` into the survivor-batch layer (item 4),
-  full in-CADO CUDA build, and in-factorization validation/retuning — all fully
-  testable on this hardware.
+- ✅ **Full suite builds with CUDA** (`-DENABLE_GPU=ON -DCMAKE_CUDA_ARCHITECTURES=86`)
+  and the **live hook is wired** into `factor_leftover_norms` behind `CADO_GPU_ECM`
+  (default OFF).
+- ✅ **Relations-identical validated**: GPU `shadow` mode is byte-for-byte
+  identical to CPU-only on a real c120 sieve run while splitting 37023 real
+  survivor cofactors on the RTX 3090.
+- ⏳ Remaining (throughput): batch the per-bucket-region drain into one GPU
+  launch and retune `ncurves`/`mfb`/B2 — the per-call hook validates correctness
+  but is launch-latency bound, not yet a net speedup.

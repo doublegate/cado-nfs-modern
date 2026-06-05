@@ -1,0 +1,8 @@
+# out-of-tree build directories (build/<hostname> from call_cmake.sh; build-gpu
+# from the -DENABLE_GPU CUDA build) -- never committed
+/build/
+/build-gpu/
+
+# Python bytecode caches from the orchestration layer
+__pycache__/
+*.pyc
