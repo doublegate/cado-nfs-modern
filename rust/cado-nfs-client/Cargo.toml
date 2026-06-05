@@ -18,6 +18,11 @@ sha1 = "0.10"
 sha2 = "0.10"
 sha3 = "0.10"
 anyhow = "1"
+# direct rustls (same 0.23 reqwest's rustls-tls pulls) for --certsha1 cert pinning
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [profile.release]
 strip = true

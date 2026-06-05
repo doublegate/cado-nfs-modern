@@ -132,21 +132,62 @@ The row advanced **AVAILABLE(0) → ASSIGNED(1) → RECEIVED_OK(3)** and the res
 file was recorded in `files` — the complete server-side lifecycle over the real
 schema, driving the same Rust client that also runs against the Python server.
 
+## Robustness features (all validated)
+
+`rust/robustness-test.sh` exercises the production-hardening features — **8/8
+pass**:
+
+- **Server, stale-work reassignment** — a background task returns ASSIGNED rows
+  to AVAILABLE after `--wutimeout` seconds, so a dead client's work is re-handed
+  out (verified: assign → wait → row back to AVAILABLE).
+- **Server, serving-finished `410`** — `POST /control action=finish|resume`
+  toggles a flag; `/workunit` then answers `410` so clients terminate cleanly
+  (the Python driver's "computation done" signal).
+- **Server, connection pool** — r2d2 over SQLite in WAL mode (was a single
+  mutex-guarded connection).
+- **Server TLS** — `--cert/--key` PEM serve HTTPS (axum-server + rustls),
+  matching the Python self-signed-cert server.
+- **Client failover** — multiple `--server` URLs; each work-unit's downloads and
+  upload stick to the server that handed it out; connection errors rotate to the
+  next, and *all-unreachable* exits non-zero (distinct from "no work").
+- **Client cert pinning** — `--certsha1 <hex>` accepts the TLS handshake only if
+  the server's certificate hashes to the pinned value (verified: correct pin
+  connects over TLS; a wrong pin is rejected). Plus `--insecure` / `--cafile`.
+- **Client `--niceness`** renices children; downloads take an advisory `flock`.
+
+## Deployment: a real factorization, driven entirely by Rust clients
+
+`rust/deploy-test.sh` runs `cado-nfs.py <N> server.ssl=no slaves.nrclients=0
+server.whitelist=localhost` — i.e. cado-nfs.py starts **only the server +
+driver, no Python clients** — and launches two `cado-nfs-client-rs` instances as
+the *only* workers. They process every polyselect and `las` sieve work-unit until
+the server signals `410`:
+
+```
+cado-nfs.py exit code: 0
+factors: 260938498861057 588120598053661 760926063870977 773951836515617
+19 work-units processed by Rust clients   ## PASS
+```
+
+The 59-digit input was **factored end-to-end with the Rust client as the sole
+distributed worker** — the deployment integration, validated. (`slaves.nrclients=0`
+is the stock "I'll provide my own clients" mode; `server.whitelist=localhost`
+admits the external client, which cado-nfs.py would otherwise whitelist only for
+the hosts it spawns itself.)
+
 ## Scope
 
-**Implemented & validated:**
-- Client: the complete single-server loop, interoperating **live with the Python
-  server** (`rust/interop-test.sh`).
-- Server: the five endpoints + the `wudb` assign/result lifecycle, validated with
-  the Rust client over the real schema (`rust/server-interop-test.sh`).
+**Implemented & validated end-to-end:** the client (full loop, failover, TLS +
+cert-pinning, niceness, flock) interoperating **live with the Python server**;
+the server (five endpoints, `wudb` assign/result lifecycle, timeout
+reassignment, `410`, pool, TLS) validated with the Rust client; and a **real
+factorization run entirely by external Rust clients** against the stock
+`cado-nfs.py` driver.
 
-**Deferred (documented follow-ons):**
-- Client: multi-server failover, automatic certificate download/pinning
-  (`--certsha1`), file locking + half-download backlog, `--niceness`.
-- Server: timeout-driven reassignment (ASSIGNED → AVAILABLE after `wutimeout`),
-  the `410`/serving-finished signal, TLS termination, and **deployment
-  integration** — getting `cado-nfs.py` to launch this server (and feed it the
-  in-process registered-files set) in place of `api_server.py`. The DB lifecycle
-  and protocol are done; this remaining piece is wiring, not new logic.
-- A connection pool (the demo uses one mutex-guarded connection); SQLite's single
-  writer makes this correct but not maximally concurrent.
+**Remaining (optional polish, not blockers):** using `cado-wu-server-rs` *in
+place of* `api_server.py` inside a cado-nfs.py run (the client side is a drop-in;
+the server side would also need cado-nfs.py to register input files with the
+external server — `--filedir` already serves a directory, so this is config
+wiring); client `STDIN` redirection (dead in the Python client too); and porting
+the high-level task DAG (`cadotask.py`), which the plan intentionally leaves in
+Python.

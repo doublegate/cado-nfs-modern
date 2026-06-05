@@ -1,6 +1,6 @@
 // cado-nfs-client-rs -- a static-binary work-unit client for CADO-NFS.
 //
-// It speaks the exact HTTP/JSON protocol of the stock Python server
+// Speaks the exact HTTP/JSON protocol of the stock Python server
 // (scripts/cadofactor/api_server.py + workunit.py), so it interoperates with an
 // unmodified cado-nfs.py run:
 //
@@ -8,17 +8,15 @@
 //   GET  /file/<name>                            -> input file (sha1/256/3_256 checked)
 //   POST /upload    (multipart: clientid, WUid, fileinfo JSON, result files)
 //
-// The work loop: fetch a WU, download its `download` files (checksum-verified),
-// substitute `$FID`/`${FID}` placeholders into each command (file ids are
-// dir-mapped by prefix: FILE->dldir, WDIR/RESULT/STDOUT/...->workdir,
-// EXECFILE->downloaded binary), run them (argv split on spaces, no shell, as the
-// Python client does), capturing stdout/stderr to STDOUT%d/STDERR%d files or for
-// upload, then POST the `upload` files + captured stdio back.
+// Loop: fetch a WU, download its `download` files (checksum-verified, advisory
+// flock so co-located clients don't race), substitute `$FID`/`${FID}` into each
+// command (file ids dir-mapped by prefix), run them (argv split on spaces, no
+// shell, as the Python client; optional renice), capturing stdout/stderr to
+// STDOUT%d/STDERR%d files or for upload, then POST the `upload` files + stdio.
 //
-// Scope vs the Python client: single server, core loop. Deferred (documented in
-// docs/rust-orchestration.md): multi-server failover, automatic certificate
-// download, file locking/backlog. TLS: pass --insecure for the self-signed dev
-// cert, or --cafile <pem>.
+// Robustness: pass --server multiple times for failover (each WU's downloads and
+// upload stick to the server that handed it out); --niceness renices children;
+// TLS via --insecure / CADO_NFS_CAFILE / --certsha1 (cert fingerprint pinning).
 
 use anyhow::{bail, Context, Result};
 use sha1::Digest;
@@ -35,6 +33,7 @@ struct FileSpec {
     upload: bool,
     #[serde(default)]
     download: bool,
+    #[allow(dead_code)]
     suggest_path: Option<String>,
 }
 
@@ -48,48 +47,58 @@ struct Workunit {
 }
 
 struct Settings {
-    server: String,
+    servers: Vec<String>,
     clientid: String,
     dldir: PathBuf,
     workdir: PathBuf,
     arch: String,
     download_retry: u64,
     single: bool,
+    niceness: i32,
 }
 
 enum Fetch {
     Work(Workunit),
-    Empty, // 404: no work yet, retry later
-    Done,  // 410: computation finished
+    Empty,       // some server reachable, but no work (404)
+    Unreachable, // no server could be reached at all
+    Done,        // 410
 }
 
 fn main() -> Result<()> {
     let s = parse_args()?;
     std::fs::create_dir_all(&s.dldir).ok();
     std::fs::create_dir_all(&s.workdir).ok();
-
-    let client = build_http_client()?;
+    let client = build_http_client(&s)?;
     eprintln!(
-        "# cado-nfs-client-rs: server={} clientid={}",
-        s.server, s.clientid
+        "# cado-nfs-client-rs: {} server(s), clientid={}",
+        s.servers.len(),
+        s.clientid
     );
 
+    let mut idx = 0usize;
     loop {
-        match fetch_wu(&client, &s)? {
-            Fetch::Done => {
+        match fetch_wu_failover(&client, &s, &mut idx) {
+            (Fetch::Done, _) => {
                 eprintln!("# server says the computation is finished; exiting");
                 break;
             }
-            Fetch::Empty => {
+            (Fetch::Empty, _) => {
                 if s.single {
-                    eprintln!("# no work available (404); --single, exiting");
+                    eprintln!("# no work available; --single, exiting");
                     break;
                 }
                 std::thread::sleep(Duration::from_secs(s.download_retry));
             }
-            Fetch::Work(wu) => {
+            (Fetch::Unreachable, _) => {
+                eprintln!("# no server could be reached");
+                if s.single {
+                    std::process::exit(2);
+                }
+                std::thread::sleep(Duration::from_secs(s.download_retry));
+            }
+            (Fetch::Work(wu), server) => {
                 let id = wu.id.clone();
-                match process_wu(&client, &s, &wu) {
+                match process_wu(&client, &s, &server, &wu) {
                     Ok(()) => eprintln!("# workunit {id} done"),
                     Err(e) => eprintln!("# workunit {id} failed: {e:#}"),
                 }
@@ -102,28 +111,68 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn build_http_client() -> Result<reqwest::blocking::Client> {
-    let insecure = std::env::var("CADO_NFS_INSECURE").is_ok();
+fn build_http_client(s: &Settings) -> Result<reqwest::blocking::Client> {
     let mut b = reqwest::blocking::Client::builder().timeout(Duration::from_secs(600));
-    if insecure {
-        b = b.danger_accept_invalid_certs(true).danger_accept_invalid_hostnames(true);
+    if std::env::var("CADO_NFS_INSECURE").is_ok() {
+        b = b
+            .danger_accept_invalid_certs(true)
+            .danger_accept_invalid_hostnames(true);
     }
     if let Ok(ca) = std::env::var("CADO_NFS_CAFILE") {
         let pem = std::fs::read(&ca).with_context(|| format!("reading cafile {ca}"))?;
-        let cert = reqwest::Certificate::from_pem(&pem).context("parsing cafile")?;
-        b = b.add_root_certificate(cert);
+        b = b.add_root_certificate(
+            reqwest::Certificate::from_pem(&pem).context("parsing cafile")?,
+        );
+    }
+    // --certsha1: pin the server cert by sha1 fingerprint. A custom rustls
+    // verifier accepts the connection iff the presented end-entity cert hashes to
+    // the pinned value (the Python client's "trust this exact cert" model). This
+    // works regardless of CA flags/hostname, which is the point of pinning.
+    if let Ok(fp) = std::env::var("CADO_NFS_CERTSHA1") {
+        let want = fp.replace([':', ' '], "").to_ascii_lowercase();
+        let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+        let config = rustls::ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .context("tls versions")?
+            .dangerous()
+            .with_custom_certificate_verifier(std::sync::Arc::new(certpin::PinnedVerifier { want }))
+            .with_no_client_auth();
+        eprintln!("# pinning server cert sha1={fp}");
+        b = b.use_preconfigured_tls(config);
     }
     b.build().context("building HTTP client")
 }
 
-// GET /workunit with a form-urlencoded body `clientid=...` (matches the Python
-// client's `requests.get(url, data={'clientid': ...})`, which Werkzeug parses
-// into request.form on the server).
-fn fetch_wu(client: &reqwest::blocking::Client, s: &Settings) -> Result<Fetch> {
-    let url = format!("{}/workunit", s.server.trim_end_matches('/'));
+// Try each server (rotating from idx) until one answers; failover on connection
+// errors. Returns the work-unit/verdict and the server URL that produced it.
+fn fetch_wu_failover(
+    client: &reqwest::blocking::Client,
+    s: &Settings,
+    idx: &mut usize,
+) -> (Fetch, String) {
+    let n = s.servers.len();
+    let mut reachable = false;
+    for k in 0..n {
+        let i = (*idx + k) % n;
+        let srv = &s.servers[i];
+        match fetch_one(client, srv, &s.clientid) {
+            Ok(Fetch::Work(wu)) => {
+                *idx = i;
+                return (Fetch::Work(wu), srv.clone());
+            }
+            Ok(Fetch::Done) => return (Fetch::Done, srv.clone()),
+            Ok(_) => reachable = true, // Empty: reachable, just no work
+            Err(e) => eprintln!("# server {srv} unreachable: {e}; trying next"),
+        }
+    }
+    (if reachable { Fetch::Empty } else { Fetch::Unreachable }, String::new())
+}
+
+fn fetch_one(client: &reqwest::blocking::Client, server: &str, clientid: &str) -> Result<Fetch> {
+    let url = format!("{}/workunit", server.trim_end_matches('/'));
     let resp = client
         .get(&url)
-        .form(&[("clientid", s.clientid.as_str())])
+        .form(&[("clientid", clientid)])
         .send()
         .context("requesting workunit")?;
     match resp.status().as_u16() {
@@ -131,7 +180,7 @@ fn fetch_wu(client: &reqwest::blocking::Client, s: &Settings) -> Result<Fetch> {
             let body = resp.text().context("reading workunit body")?;
             let wu: Workunit = serde_json::from_str(&body)
                 .with_context(|| format!("parsing workunit json: {body}"))?;
-            eprintln!("# got workunit {}", wu.id);
+            eprintln!("# got workunit {} from {server}", wu.id);
             Ok(Fetch::Work(wu))
         }
         404 => Ok(Fetch::Empty),
@@ -140,26 +189,35 @@ fn fetch_wu(client: &reqwest::blocking::Client, s: &Settings) -> Result<Fetch> {
     }
 }
 
-fn process_wu(client: &reqwest::blocking::Client, s: &Settings, wu: &Workunit) -> Result<()> {
-    download_files(client, s, wu)?;
+fn process_wu(
+    client: &reqwest::blocking::Client,
+    s: &Settings,
+    server: &str,
+    wu: &Workunit,
+) -> Result<()> {
+    download_files(client, s, server, wu)?;
     let (errorcode, failedcommand, stdio) = run_commands(s, wu)?;
-    upload(client, s, wu, errorcode, failedcommand, stdio)
+    upload(client, s, server, wu, errorcode, failedcommand, stdio)
 }
 
-// Substitute $ARCH (Template-style) in a download filename.
 fn subst_arch(name: &str, arch: &str) -> String {
     substitute(name, &HashMap::from([("ARCH".to_string(), arch.to_string())]))
 }
 
-fn download_files(client: &reqwest::blocking::Client, s: &Settings, wu: &Workunit) -> Result<()> {
+fn download_files(
+    client: &reqwest::blocking::Client,
+    s: &Settings,
+    server: &str,
+    wu: &Workunit,
+) -> Result<()> {
     for (fid, f) in &wu.files {
         if !f.download {
             continue;
         }
         let urlname = subst_arch(&f.filename, &s.arch);
-        let dlname = subst_arch(&f.filename, ""); // saved name uses blank ARCH
+        let dlname = subst_arch(&f.filename, "");
         let dlpath = s.dldir.join(&dlname);
-        let url = format!("{}/file/{}", s.server.trim_end_matches('/'), urlname);
+        let url = format!("{}/file/{}", server.trim_end_matches('/'), urlname);
 
         let resp = client.get(&url).send().with_context(|| format!("GET {url}"))?;
         if !resp.status().is_success() {
@@ -175,7 +233,7 @@ fn download_files(client: &reqwest::blocking::Client, s: &Settings, wu: &Workuni
         if let Some(parent) = dlpath.parent() {
             std::fs::create_dir_all(parent).ok();
         }
-        std::fs::write(&dlpath, &bytes).with_context(|| format!("writing {dlpath:?}"))?;
+        write_locked(&dlpath, &bytes).with_context(|| format!("writing {dlpath:?}"))?;
         if fid.starts_with("EXECFILE") {
             make_executable(&dlpath);
         }
@@ -183,26 +241,40 @@ fn download_files(client: &reqwest::blocking::Client, s: &Settings, wu: &Workuni
     Ok(())
 }
 
+// Write under an advisory exclusive lock so two clients sharing a dldir don't
+// clobber each other's partial downloads.
+fn write_locked(path: &Path, data: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(path)?;
+    flock(&f, true);
+    f.write_all(data)?;
+    f.flush()?;
+    flock(&f, false);
+    Ok(())
+}
+
+#[cfg(unix)]
+fn flock(f: &std::fs::File, lock: bool) {
+    use std::os::unix::io::AsRawFd;
+    let op = if lock { libc::LOCK_EX } else { libc::LOCK_UN };
+    unsafe {
+        libc::flock(f.as_raw_fd(), op);
+    }
+}
+#[cfg(not(unix))]
+fn flock(_f: &std::fs::File, _lock: bool) {}
+
 fn checksum(data: &[u8], algo: &str) -> Result<String> {
-    let hex = match algo {
-        "sha1" => {
-            let mut h = sha1::Sha1::new();
-            h.update(data);
-            hex(&h.finalize())
-        }
-        "sha256" => {
-            let mut h = sha2::Sha256::new();
-            h.update(data);
-            hex(&h.finalize())
-        }
-        "sha3_256" => {
-            let mut h = sha3::Sha3_256::new();
-            h.update(data);
-            hex(&h.finalize())
-        }
+    Ok(match algo {
+        "sha1" => hex(&sha1::Sha1::digest(data)),
+        "sha256" => hex(&sha2::Sha256::digest(data)),
+        "sha3_256" => hex(&sha3::Sha3_256::digest(data)),
         other => bail!("unknown checksum algorithm {other}"),
-    };
-    Ok(hex)
+    })
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -225,12 +297,10 @@ fn make_executable(p: &Path) {
 #[cfg(not(unix))]
 fn make_executable(_p: &Path) {}
 
-// Map each file id to the local path used for command substitution, following
-// the Python client's prefix->directory rules.
 fn file_map(s: &Settings, wu: &Workunit) -> HashMap<String, String> {
     let mut m = HashMap::new();
     for (fid, f) in &wu.files {
-        let name = subst_arch(&f.filename, ""); // local names use blank ARCH
+        let name = subst_arch(&f.filename, "");
         let path: PathBuf = if fid.starts_with("FILE") || fid.starts_with("EXECFILE") {
             s.dldir.join(&name)
         } else if fid.starts_with("RESULT")
@@ -248,8 +318,7 @@ fn file_map(s: &Settings, wu: &Workunit) -> HashMap<String, String> {
     m
 }
 
-// Template.safe_substitute: replace $ident and ${ident} from the map; leave
-// unknown placeholders and `$$` (-> literal `$`) intact.
+// Template.safe_substitute: $ident and ${ident}; $$ -> $; unknown left intact.
 fn substitute(input: &str, map: &HashMap<String, String>) -> String {
     let bytes = input.as_bytes();
     let mut out = String::with_capacity(input.len());
@@ -260,14 +329,12 @@ fn substitute(input: &str, map: &HashMap<String, String>) -> String {
             i += 1;
             continue;
         }
-        // at a '$'
         if i + 1 < bytes.len() && bytes[i + 1] == b'$' {
-            out.push('$'); // $$ -> $
+            out.push('$');
             i += 2;
             continue;
         }
         let (name, next) = if i + 1 < bytes.len() && bytes[i + 1] == b'{' {
-            // ${ident}
             match input[i + 2..].find('}') {
                 Some(rel) => (input[i + 2..i + 2 + rel].to_string(), i + 2 + rel + 1),
                 None => {
@@ -277,7 +344,6 @@ fn substitute(input: &str, map: &HashMap<String, String>) -> String {
                 }
             }
         } else {
-            // $ident (identifier = [A-Za-z_][A-Za-z0-9_]*)
             let start = i + 1;
             let mut j = start;
             while j < bytes.len()
@@ -296,9 +362,8 @@ fn substitute(input: &str, map: &HashMap<String, String>) -> String {
         match map.get(&name) {
             Some(v) => out.push_str(v),
             None => {
-                // safe_substitute leaves it as-is
                 out.push('$');
-                out.push_str(&name); // approximate; fine for our placeholders
+                out.push_str(&name);
             }
         }
         i = next;
@@ -308,12 +373,11 @@ fn substitute(input: &str, map: &HashMap<String, String>) -> String {
 
 type Stdio = HashMap<String, Vec<u8>>;
 
-// Returns (errorcode, failedcommand, captured stdio blobs keyed by "STDOUT<n>"/"STDERR<n>").
 fn run_commands(s: &Settings, wu: &Workunit) -> Result<(Option<i32>, Option<String>, Stdio)> {
     let map = file_map(s, wu);
     let mut stdio: Stdio = HashMap::new();
     for (counter, raw) in wu.commands.iter().enumerate() {
-        let command = raw.replace('\'', ""); // bug 21827
+        let command = raw.replace('\'', "");
         let command = substitute(&command, &map);
         let argv: Vec<String> = command
             .split(' ')
@@ -324,12 +388,11 @@ fn run_commands(s: &Settings, wu: &Workunit) -> Result<(Option<i32>, Option<Stri
             continue;
         }
         eprintln!("# running: {command}");
-        let out = std::process::Command::new(&argv[0])
-            .args(&argv[1..])
-            .output()
-            .with_context(|| format!("spawning {}", argv[0]))?;
+        let mut cmd = std::process::Command::new(&argv[0]);
+        cmd.args(&argv[1..]);
+        set_niceness(&mut cmd, s.niceness);
+        let out = cmd.output().with_context(|| format!("spawning {}", argv[0]))?;
 
-        // route stdout: to STDOUT<n> file if declared, else keep for upload
         let so_key = format!("STDOUT{counter}");
         if let Some(path) = map.get(&so_key) {
             std::fs::write(path, &out.stdout).ok();
@@ -352,12 +415,26 @@ fn run_commands(s: &Settings, wu: &Workunit) -> Result<(Option<i32>, Option<Stri
     Ok((None, None, stdio))
 }
 
-// POST /upload multipart: clientid, WUid, [errorcode], [failedcommand],
-// fileinfo (JSON {basename: {WUid, key}}), plus the `upload` files and captured
-// stdio blobs.
+#[cfg(unix)]
+fn set_niceness(cmd: &mut std::process::Command, niceness: i32) {
+    if niceness <= 0 {
+        return;
+    }
+    use std::os::unix::process::CommandExt;
+    unsafe {
+        cmd.pre_exec(move || {
+            libc::setpriority(libc::PRIO_PROCESS, 0, niceness);
+            Ok(())
+        });
+    }
+}
+#[cfg(not(unix))]
+fn set_niceness(_cmd: &mut std::process::Command, _niceness: i32) {}
+
 fn upload(
     client: &reqwest::blocking::Client,
     s: &Settings,
+    server: &str,
     wu: &Workunit,
     errorcode: Option<i32>,
     failedcommand: Option<String>,
@@ -373,10 +450,8 @@ fn upload(
     if let Some(fc) = failedcommand {
         form = form.text("failedcommand", fc);
     }
-
     let mut fileinfo = serde_json::Map::new();
 
-    // declared upload files (from workdir)
     for (fid, f) in &wu.files {
         if !f.upload {
             continue;
@@ -390,54 +465,43 @@ fn upload(
                 continue;
             }
         };
-        let basename = name.clone();
-        fileinfo.insert(
-            basename.clone(),
-            serde_json::json!({"WUid": wu.id, "key": fid}),
-        );
-        form = form.part(
-            basename.clone(),
-            Part::bytes(data).file_name(basename),
-        );
+        fileinfo.insert(name.clone(), serde_json::json!({"WUid": wu.id, "key": fid}));
+        form = form.part(name.clone(), Part::bytes(data).file_name(name));
     }
-
-    // captured stdout/stderr blobs -> "<wuid>.STDOUT<n>" etc.
     for (key, blob) in stdio {
         let basename = format!("{}.{}", wu.id, key);
-        fileinfo.insert(
-            basename.clone(),
-            serde_json::json!({"WUid": wu.id, "key": key}),
-        );
-        form = form.part(
-            basename.clone(),
-            Part::bytes(blob).file_name(basename),
-        );
+        fileinfo.insert(basename.clone(), serde_json::json!({"WUid": wu.id, "key": key}));
+        form = form.part(basename.clone(), Part::bytes(blob).file_name(basename));
     }
-
     form = form.text("fileinfo", serde_json::Value::Object(fileinfo).to_string());
 
-    let url = format!("{}/upload", s.server.trim_end_matches('/'));
+    let url = format!("{}/upload", server.trim_end_matches('/'));
     let resp = client.post(&url).multipart(form).send().context("POST /upload")?;
     if !resp.status().is_success() {
         bail!("upload -> status {}", resp.status());
     }
-    eprintln!("# uploaded results for {}", wu.id);
+    eprintln!("# uploaded results for {} to {server}", wu.id);
     Ok(())
 }
 
 fn parse_args() -> Result<Settings> {
-    let mut server = None;
+    let mut servers = vec![];
     let mut clientid = None;
     let mut dldir = None;
     let mut workdir = None;
     let mut arch = String::new();
     let mut download_retry = 10u64;
     let mut single = false;
+    let mut niceness = 0i32;
 
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
-            "--server" => server = it.next(),
+            "--server" => {
+                if let Some(v) = it.next() {
+                    servers.push(v);
+                }
+            }
             "--clientid" => clientid = it.next(),
             "--dldir" => dldir = it.next().map(PathBuf::from),
             "--workdir" => workdir = it.next().map(PathBuf::from),
@@ -445,31 +509,42 @@ fn parse_args() -> Result<Settings> {
             "--downloadretry" => {
                 download_retry = it.next().and_then(|v| v.parse().ok()).unwrap_or(10)
             }
+            "--niceness" => niceness = it.next().and_then(|v| v.parse().ok()).unwrap_or(0),
+            "--certsha1" => {
+                if let Some(v) = it.next() {
+                    std::env::set_var("CADO_NFS_CERTSHA1", v);
+                }
+            }
+            "--insecure" => std::env::set_var("CADO_NFS_INSECURE", "1"),
+            "--cafile" => {
+                if let Some(v) = it.next() {
+                    std::env::set_var("CADO_NFS_CAFILE", v);
+                }
+            }
             "--single" => single = true,
             "-h" | "--help" => {
                 eprintln!(
-                    "usage: cado-nfs-client-rs --server URL [--clientid ID] \
-                     [--dldir DIR] [--workdir DIR] [--arch S] [--downloadretry SECS] [--single]\n\
-                     env: CADO_NFS_INSECURE=1 (accept self-signed TLS), CADO_NFS_CAFILE=<pem>"
+                    "usage: cado-nfs-client-rs --server URL [--server URL ...] [--clientid ID]\n\
+                     [--dldir DIR] [--workdir DIR] [--arch S] [--downloadretry SECS]\n\
+                     [--niceness N] [--single] [--insecure] [--cafile PEM] [--certsha1 HEX]"
                 );
                 std::process::exit(0);
             }
             other => bail!("unknown argument {other} (try --help)"),
         }
     }
-
-    let server = server.context("--server URL is required")?;
-    let clientid = clientid.unwrap_or_else(default_clientid);
-    let dldir = dldir.unwrap_or_else(|| std::env::temp_dir().join("cado-client-dl"));
-    let workdir = workdir.unwrap_or_else(|| std::env::temp_dir().join("cado-client-work"));
+    if servers.is_empty() {
+        bail!("at least one --server URL is required");
+    }
     Ok(Settings {
-        server,
-        clientid,
-        dldir,
-        workdir,
+        servers,
+        clientid: clientid.unwrap_or_else(default_clientid),
+        dldir: dldir.unwrap_or_else(|| std::env::temp_dir().join("cado-client-dl")),
+        workdir: workdir.unwrap_or_else(|| std::env::temp_dir().join("cado-client-work")),
         arch,
         download_retry,
         single,
+        niceness,
     })
 }
 
@@ -478,4 +553,58 @@ fn default_clientid() -> String {
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|_| "host".to_string());
     format!("{host}-rs-{}", std::process::id())
+}
+
+// --certsha1 cert pinning: a rustls verifier that accepts the TLS handshake iff
+// the server's end-entity certificate hashes (sha1) to the pinned value.
+mod certpin {
+    use sha1::Digest;
+
+    #[derive(Debug)]
+    pub struct PinnedVerifier {
+        pub want: String, // lowercase hex sha1
+    }
+
+    impl rustls::client::danger::ServerCertVerifier for PinnedVerifier {
+        fn verify_server_cert(
+            &self,
+            end_entity: &rustls::pki_types::CertificateDer<'_>,
+            _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+            _name: &rustls::pki_types::ServerName<'_>,
+            _ocsp: &[u8],
+            _now: rustls::pki_types::UnixTime,
+        ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+            let got = super::hex(&sha1::Sha1::digest(end_entity.as_ref()));
+            if got == self.want {
+                Ok(rustls::client::danger::ServerCertVerified::assertion())
+            } else {
+                Err(rustls::Error::General(format!(
+                    "pinned cert sha1 mismatch: got {got}, want {}",
+                    self.want
+                )))
+            }
+        }
+        // the fingerprint pin is the trust decision; accept the cert's own signatures
+        fn verify_tls12_signature(
+            &self,
+            _m: &[u8],
+            _c: &rustls::pki_types::CertificateDer<'_>,
+            _d: &rustls::DigitallySignedStruct,
+        ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+            Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        }
+        fn verify_tls13_signature(
+            &self,
+            _m: &[u8],
+            _c: &rustls::pki_types::CertificateDer<'_>,
+            _d: &rustls::DigitallySignedStruct,
+        ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+            Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        }
+        fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+            rustls::crypto::ring::default_provider()
+                .signature_verification_algorithms
+                .supported_schemes()
+        }
+    }
 }
