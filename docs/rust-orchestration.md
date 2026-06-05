@@ -89,19 +89,64 @@ The Rust client fetched a genuine work-unit, **downloaded + checksum-verified +
 chmod'd the `polyselect` binary**, ran the real command, and **uploaded the
 result, which the Python server accepted (HTTP 200)** — full protocol interop.
 
+## `cado-wu-server-rs` (the server + DB port)
+
+`rust/cado-wu-server` — an async server (**axum** + **tokio** + **rusqlite**,
+bundled SQLite so it is self-contained) that implements the same five endpoints
+over the same **`wudb` SQLite schema** (`wudb.py` tables `workunits` and
+`files`, with the exact `status` codes: 0 AVAILABLE, 1 ASSIGNED, 3 RECEIVED_OK,
+4 RECEIVED_ERROR, …). It replicates the `WuAccess` core logic:
+
+- **`GET /workunit`** → assign: `SELECT … WHERE status=0 LIMIT 1`, then
+  `UPDATE status=1, assignedclient, timeassigned` (single-writer atomic; lost
+  races return 404). `404` when none available.
+- **`POST /upload`** → record: verify the row is ASSIGNED, save the result files,
+  `INSERT` them into `files` (linked by `wurowid`), `UPDATE status=3/4,
+  resultclient, errorcode, timeresult`.
+- **`GET /file/<path>`** serves input files from `--filedir` (with a `..` guard);
+  **`GET /files`** lists them; **`GET /`** is the health check.
+
+Because it reads/writes the exact `wudb` schema and status codes, a database the
+Python driver (`cadotask.py`) populates with AVAILABLE rows is consumable by this
+server, and the results it writes back are visible to the driver.
+
+```
+cd rust && cargo build --release      # -> rust/target/release/cado-wu-server-rs
+cado-wu-server-rs --db <wu.db> [--filedir DIR] [--uploaddir DIR] [--addr 127.0.0.1] [--port N]
+# --port 0 picks an ephemeral port; the bound URL is printed as `SERVER_URL http://...`
+```
+
+### Validated: full work-unit lifecycle, Rust server + Rust client
+
+`rust/server-interop-test.sh` seeds a DB (wudb schema) with one AVAILABLE
+work-unit, starts the server, and runs the Rust client against it:
+
+```
+got workunit testwu1 -> cat input.txt (sha1-verified) -> uploaded results
+workunit status=3 (RECEIVED_OK) resultclient=srvtest
+result files recorded=1  type=STDOUT0
+uploaded result content='hello cado rust'   ## PASS
+```
+
+The row advanced **AVAILABLE(0) → ASSIGNED(1) → RECEIVED_OK(3)** and the result
+file was recorded in `files` — the complete server-side lifecycle over the real
+schema, driving the same Rust client that also runs against the Python server.
+
 ## Scope
 
-**Implemented & validated:** the complete single-server client loop — WU fetch,
-checksummed downloads, prefix-mapped command substitution, no-shell exec,
-stdout/stderr routing, multipart upload — interoperating live with the Python
-server.
+**Implemented & validated:**
+- Client: the complete single-server loop, interoperating **live with the Python
+  server** (`rust/interop-test.sh`).
+- Server: the five endpoints + the `wudb` assign/result lifecycle, validated with
+  the Rust client over the real schema (`rust/server-interop-test.sh`).
 
 **Deferred (documented follow-ons):**
 - Client: multi-server failover, automatic certificate download/pinning
-  (`--certsha1`), file locking + half-download backlog, `STDIN` redirection
-  (dead in the Python client too), `--niceness`.
-- **Server + DB** (plan item 1): port `api_server.py` + the `wudb` SQLite layer
-  to async Rust (axum/tokio + rusqlite/sqlx) behind the same protocol, so the
-  Rust server interoperates with the Python driver and clients. This is the
-  larger scalability piece; the client above is the self-contained first step and
-  the proof that the protocol is correctly understood.
+  (`--certsha1`), file locking + half-download backlog, `--niceness`.
+- Server: timeout-driven reassignment (ASSIGNED → AVAILABLE after `wutimeout`),
+  the `410`/serving-finished signal, TLS termination, and **deployment
+  integration** — getting `cado-nfs.py` to launch this server (and feed it the
+  in-process registered-files set) in place of `api_server.py`. The DB lifecycle
+  and protocol are done; this remaining piece is wiring, not new logic.
+- A connection pool (the demo uses one mutex-guarded connection); SQLite's single
+  writer makes this correct but not maximally concurrent.

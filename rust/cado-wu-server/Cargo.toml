@@ -1,0 +1,21 @@
+[package]
+name = "cado-wu-server"
+version = "3.0.0"
+edition = "2021"
+description = "Async work-unit server for CADO-NFS (same HTTP protocol + wudb SQLite schema as api_server.py)"
+license = "LGPL-2.1-or-later"
+
+[[bin]]
+name = "cado-wu-server-rs"
+path = "src/main.rs"
+
+[dependencies]
+axum = { version = "0.7", features = ["multipart"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "signal"] }
+rusqlite = { version = "0.31", features = ["bundled"] }   # bundled = static sqlite, no system dep
+serde_json = "1"
+anyhow = "1"
+
+[profile.release]
+strip = true
+lto = true
