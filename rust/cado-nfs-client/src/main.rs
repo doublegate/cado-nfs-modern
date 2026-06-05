@@ -68,7 +68,7 @@ fn main() -> Result<()> {
     let s = parse_args()?;
     std::fs::create_dir_all(&s.dldir).ok();
     std::fs::create_dir_all(&s.workdir).ok();
-    let client = build_http_client(&s)?;
+    let client = build_http_client()?;
     eprintln!(
         "# cado-nfs-client-rs: {} server(s), clientid={}",
         s.servers.len(),
@@ -111,7 +111,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn build_http_client(s: &Settings) -> Result<reqwest::blocking::Client> {
+fn build_http_client() -> Result<reqwest::blocking::Client> {
     let mut b = reqwest::blocking::Client::builder().timeout(Duration::from_secs(600));
     if std::env::var("CADO_NFS_INSECURE").is_ok() {
         b = b
@@ -187,6 +187,20 @@ fn fetch_one(client: &reqwest::blocking::Client, server: &str, clientid: &str) -
         410 => Ok(Fetch::Done),
         other => bail!("unexpected status {other} from {url}"),
     }
+}
+
+// fileinfo entry for an uploaded file: {WUid, key, [command]}. `command` is the
+// command index a STDOUT<n>/STDERR<n>/RESULT<n> file came from (the trailing
+// digits of the file id); the server stores it and the driver reads stdio by it.
+fn fileinfo_entry(wuid: &str, key: &str) -> serde_json::Value {
+    let digits: String = key.chars().rev().take_while(|c| c.is_ascii_digit()).collect();
+    let mut v = serde_json::json!({"WUid": wuid, "key": key});
+    if !digits.is_empty() {
+        if let Ok(cmd) = digits.chars().rev().collect::<String>().parse::<i64>() {
+            v["command"] = serde_json::json!(cmd);
+        }
+    }
+    v
 }
 
 fn process_wu(
@@ -465,12 +479,12 @@ fn upload(
                 continue;
             }
         };
-        fileinfo.insert(name.clone(), serde_json::json!({"WUid": wu.id, "key": fid}));
+        fileinfo.insert(name.clone(), fileinfo_entry(&wu.id, fid));
         form = form.part(name.clone(), Part::bytes(data).file_name(name));
     }
     for (key, blob) in stdio {
         let basename = format!("{}.{}", wu.id, key);
-        fileinfo.insert(basename.clone(), serde_json::json!({"WUid": wu.id, "key": key}));
+        fileinfo.insert(basename.clone(), fileinfo_entry(&wu.id, &key));
         form = form.part(basename.clone(), Part::bytes(blob).file_name(basename));
     }
     form = form.text("fileinfo", serde_json::Value::Object(fileinfo).to_string());

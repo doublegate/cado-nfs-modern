@@ -6929,7 +6929,15 @@ class StartServerTask(DoesLogging, cadoparams.UseParameters, HasState):
 
         # lbq = self.params["linger_before_quit"]
 
-        self.server = ApiServer(
+        # In-process server swap: when CADO_RUST_WU_SERVER points at the Rust
+        # work-unit server (rust/cado-wu-server), run it as a subprocess over the
+        # same wudb SQLite database instead of the in-process Flask ApiServer.
+        if os.environ.get("CADO_RUST_WU_SERVER"):
+            from cadofactor.external_api_server import ExternalApiServer
+            ServerImpl = ExternalApiServer
+        else:
+            ServerImpl = ApiServer
+        self.server = ServerImpl(
             serveraddress, serverport, db,
             threaded=threaded,
             uploaddir=uploaddir,

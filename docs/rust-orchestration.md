@@ -175,19 +175,54 @@ is the stock "I'll provide my own clients" mode; `server.whitelist=localhost`
 admits the external client, which cado-nfs.py would otherwise whitelist only for
 the hosts it spawns itself.)
 
+## In-process server swap: the Rust server *inside* a cado-nfs.py run
+
+The final integration: `cado-wu-server-rs` running **in place of**
+`api_server.py` within a normal `cado-nfs.py` run. A thin Python shim
+(`scripts/cadofactor/external_api_server.py`, `ExternalApiServer`) implements the
+`ApiServer` interface the driver uses (`get_port`/`serve`/`shutdown`/
+`stop_serving_wus`/`get_url`/`get_cert_sha1`) by launching the Rust binary as a
+subprocess over the same `wudb` SQLite database; `cadotask.py` switches to it when
+`CADO_RUST_WU_SERVER` is set. Input files are served from the
+`server_registered_filenames` table the driver already maintains.
+
+`rust/server-swap-test.sh` validates it with the **stock Python clients**:
+
+```
+CADO_RUST_WU_SERVER=…/cado-wu-server-rs  cado-nfs.py <N> server.ssl=no -t 2
+→ 16 work-units assigned, 15 results recorded by the Rust server
+→ factors: 260938498861057 588120598053661 760926063870977 773951836515617
+→ cado-nfs.py exit 0   ## PASS
+```
+
+Getting this to work surfaced three protocol details the standalone tests could
+not (now all fixed in `cado-wu-server-rs`):
+1. **`timeassigned` format** — must be `str(datetime.utcnow())`
+   (`YYYY-MM-DD HH:MM:SS.ffffff`), not epoch seconds, or the driver mis-judges
+   timeouts and resubmits endlessly.
+2. **`//upload`** — the stock client POSTs to a double-slash path (POSTRESULTPATH
+   begins with `/` and the client joins with another `/`); Flask/Werkzeug merge
+   slashes, axum does not, so the `//upload` route is registered explicitly.
+3. **`files.command`** — the result-file row must store the originating command
+   index (from `fileinfo`), which the driver reads as `int(files.command)` when
+   collecting stdio.
+
 ## Scope
 
-**Implemented & validated end-to-end:** the client (full loop, failover, TLS +
-cert-pinning, niceness, flock) interoperating **live with the Python server**;
-the server (five endpoints, `wudb` assign/result lifecycle, timeout
-reassignment, `410`, pool, TLS) validated with the Rust client; and a **real
-factorization run entirely by external Rust clients** against the stock
-`cado-nfs.py` driver.
+**Implemented & validated end-to-end:**
+- Client (full loop, failover, TLS + cert-pinning, niceness, flock) — live with
+  the Python server (`interop-test.sh`).
+- Server (five endpoints, `wudb` assign/result lifecycle, timeout reassignment,
+  `410`, pool, TLS) — with the Rust client (`server-interop-test.sh`,
+  `robustness-test.sh` 8/8).
+- A real factorization run entirely by **external Rust clients** against the
+  stock cado-nfs.py driver (`deploy-test.sh`).
+- A real factorization run with the **Rust server swapped in** for `api_server.py`,
+  serving the stock Python clients (`server-swap-test.sh`).
 
-**Remaining (optional polish, not blockers):** using `cado-wu-server-rs` *in
-place of* `api_server.py` inside a cado-nfs.py run (the client side is a drop-in;
-the server side would also need cado-nfs.py to register input files with the
-external server — `--filedir` already serves a directory, so this is config
-wiring); client `STDIN` redirection (dead in the Python client too); and porting
-the high-level task DAG (`cadotask.py`), which the plan intentionally leaves in
+**Remaining (optional, not blockers):** client `STDIN` redirection (dead in the
+Python client too); the Rust server's IP `whitelist` enforcement (the driver's
+whitelist is bypassed — run on a trusted network); TLS for the in-process swap
+(the shim currently uses `server.ssl=no` — plain HTTP); and porting the
+high-level task DAG (`cadotask.py`), which the plan intentionally leaves in
 Python.

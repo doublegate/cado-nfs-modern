@@ -32,7 +32,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 type Pool = r2d2::Pool<SqliteConnectionManager>;
 
@@ -54,10 +54,13 @@ async fn main() -> Result<()> {
     let cfg = parse_args()?;
     std::fs::create_dir_all(&cfg.uploaddir).ok();
 
-    // pooled connections, WAL for concurrent readers + a single writer
-    let manager = SqliteConnectionManager::file(&cfg.db).with_init(|c| {
-        c.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")
-    });
+    // pooled connections. WAL lets our reads proceed concurrently with the
+    // Python driver's writes (the swap shares one SQLite file; cado uses the
+    // default rollback-journal otherwise, where a writer blocks all readers).
+    // A long busy_timeout rides out the driver's write transactions instead of
+    // failing with SQLITE_BUSY.
+    let manager = SqliteConnectionManager::file(&cfg.db)
+        .with_init(|c| c.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=30000;"));
     let pool = r2d2::Pool::builder()
         .max_size(8)
         .build(manager)
@@ -84,11 +87,11 @@ async fn main() -> Result<()> {
             loop {
                 tick.tick().await;
                 if let Ok(conn) = pool2.get() {
-                    let cutoff = now_secs().saturating_sub(wutimeout);
+                    let cutoff = dt_secs_ago(wutimeout);
                     match conn.execute(
                         "UPDATE workunits SET status=?1, assignedclient=NULL, timeassigned=NULL \
-                         WHERE status=?2 AND CAST(timeassigned AS INTEGER) < ?3",
-                        rusqlite::params![AVAILABLE, ASSIGNED, cutoff as i64],
+                         WHERE status=?2 AND timeassigned IS NOT NULL AND timeassigned < ?3",
+                        rusqlite::params![AVAILABLE, ASSIGNED, cutoff],
                     ) {
                         Ok(n) if n > 0 => eprintln!("# reclaimed {n} stale work-unit(s) -> AVAILABLE"),
                         _ => {}
@@ -104,7 +107,14 @@ async fn main() -> Result<()> {
         .route("/files", get(list_files))
         .route("/file/*path", get(download_file))
         .route("/upload", post(upload))
+        // The stock Python client POSTs to `//upload` (POSTRESULTPATH already
+        // begins with `/`, and the client joins with another `/`). Flask's
+        // Werkzeug merges duplicate slashes; axum does not, so we register the
+        // `//upload` form explicitly too. (GET /workunit and /file use slash-less
+        // path settings, so only upload is affected.)
+        .route("//upload", post(upload))
         .route("/control", post(control))
+        .fallback(fallback_404)
         .with_state(state);
 
     let addr: std::net::SocketAddr = format!("{}:{}", cfg.addr, cfg.port).parse()?;
@@ -168,6 +178,12 @@ async fn hello() -> &'static str {
     "CADO-NFS work-unit server (Rust)\n"
 }
 
+// logs the method+path of any request that matched no route
+async fn fallback_404(method: axum::http::Method, uri: axum::http::Uri) -> Response {
+    eprintln!("# 404 no route for {method} {uri}");
+    (StatusCode::NOT_FOUND, "no such endpoint").into_response()
+}
+
 async fn get_workunit(State(s): State<Arc<AppState>>, body: Bytes) -> Response {
     if !s.serving.load(Ordering::Relaxed) {
         return (StatusCode::GONE, "Distributed computation finished").into_response();
@@ -192,7 +208,7 @@ async fn get_workunit(State(s): State<Arc<AppState>>, body: Bytes) -> Response {
             match conn.execute(
                 "UPDATE workunits SET status=?1, assignedclient=?2, timeassigned=?3 \
                  WHERE wurowid=?4 AND status=?5",
-                rusqlite::params![ASSIGNED, clientid, now_secs() as i64, rowid, AVAILABLE],
+                rusqlite::params![ASSIGNED, clientid, now_dt(), rowid, AVAILABLE],
             ) {
                 Ok(1) => {
                     eprintln!("# assigned wu {rowid} to {clientid}");
@@ -208,7 +224,21 @@ async fn download_file(State(s): State<Arc<AppState>>, Path(path): Path<String>)
     if path.split('/').any(|c| c == "..") {
         return (StatusCode::BAD_REQUEST, "bad path").into_response();
     }
-    match std::fs::read(s.filedir.join(&path)) {
+    // First the cado-nfs registry table (server_registered_filenames: kkey->path,
+    // type 0 = str) used by an in-process swap; then fall back to --filedir for
+    // standalone use.
+    let mut real: Option<PathBuf> = None;
+    if let Ok(conn) = s.pool.get() {
+        if let Ok(p) = conn.query_row(
+            "SELECT value FROM server_registered_filenames WHERE kkey=?1 AND type=0",
+            [&path],
+            |r| r.get::<_, String>(0),
+        ) {
+            real = Some(PathBuf::from(p));
+        }
+    }
+    let full = real.unwrap_or_else(|| s.filedir.join(&path));
+    match std::fs::read(&full) {
         Ok(bytes) => ([("content-type", "application/octet-stream")], bytes).into_response(),
         Err(_) => (StatusCode::NOT_FOUND, "file not registered").into_response(),
     }
@@ -279,6 +309,10 @@ async fn upload(State(s): State<Arc<AppState>>, mut mp: Multipart) -> Response {
             }
         }
     }
+    if std::env::var("CADO_WU_DEBUG").is_ok() {
+        let keys: Vec<&String> = fields.keys().collect();
+        eprintln!("# upload fields={keys:?} files={}", saved.len());
+    }
     let (Some(clientid), Some(wuid)) = (fields.get("clientid"), fields.get("WUid")) else {
         return (StatusCode::BAD_REQUEST, "missing WUid and/or clientid").into_response();
     };
@@ -300,42 +334,66 @@ fn record_result(
     let Ok(conn) = s.pool.get() else {
         return (StatusCode::INTERNAL_SERVER_ERROR, "db").into_response();
     };
-    let row: Option<(i64, i64)> = conn
-        .query_row(
-            "SELECT wurowid, status FROM workunits WHERE wuid=?1",
-            [wuid],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .ok();
-    let Some((rowid, status)) = row else {
-        return (StatusCode::NOT_FOUND, "unknown WUid").into_response();
+    // CRITICAL: distinguish a genuinely-absent WUid (-> 404) from a transient DB
+    // error such as a lock (-> 503, retryable). Collapsing both to 404 makes the
+    // client give up and the driver resubmit, which deadlocks the swap.
+    let (rowid, status) = match conn.query_row(
+        "SELECT wurowid, status FROM workunits WHERE wuid=?1",
+        [wuid],
+        |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+    ) {
+        Ok(row) => row,
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            eprintln!("# upload: WUid {wuid:?} not found in workunits");
+            return (StatusCode::NOT_FOUND, "unknown WUid").into_response();
+        }
+        Err(e) => {
+            eprintln!("# upload: db error looking up {wuid:?}: {e}");
+            return (StatusCode::SERVICE_UNAVAILABLE, "db busy, retry").into_response();
+        }
     };
     if status != ASSIGNED {
         eprintln!("# warning: wu {wuid} not currently ASSIGNED (status {status})");
     }
     for (basename, destpath) in saved {
-        let key = fileinfo
-            .get(basename)
+        let info = fileinfo.get(basename);
+        let key = info
             .and_then(|v| v.get("key"))
             .and_then(|v| v.as_str())
             .unwrap_or("");
+        // `command` (the command index a STDOUT/STDERR file came from) must be
+        // stored: the driver does int(files.command) when reading stdio. It may
+        // arrive as a JSON number or string.
+        let command: Option<i64> = info.and_then(|v| v.get("command")).and_then(|c| {
+            c.as_i64().or_else(|| c.as_str().and_then(|s| s.parse().ok()))
+        });
         let _ = conn.execute(
-            "INSERT INTO files (filename, path, type, wurowid) VALUES (?1,?2,?3,?4)",
-            rusqlite::params![basename, destpath.to_string_lossy(), key, rowid],
+            "INSERT INTO files (filename, path, type, command, wurowid) VALUES (?1,?2,?3,?4,?5)",
+            rusqlite::params![basename, destpath.to_string_lossy(), key, command, rowid],
         );
     }
     let new_status = if errorcode.unwrap_or(0) == 0 { RECEIVED_OK } else { RECEIVED_ERROR };
     let _ = conn.execute(
         "UPDATE workunits SET status=?1, resultclient=?2, errorcode=?3, timeresult=?4 \
          WHERE wurowid=?5",
-        rusqlite::params![new_status, clientid, errorcode, now_secs() as i64, rowid],
+        rusqlite::params![new_status, clientid, errorcode, now_dt(), rowid],
     );
     eprintln!("# recorded result for wu {wuid} from {clientid}: status {new_status}, {} files", saved.len());
     (StatusCode::OK, "ok").into_response()
 }
 
-fn now_secs() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
+// Match the Python wudb's timestamp format, str(datetime.utcnow()):
+// "YYYY-MM-DD HH:MM:SS.ffffff". The driver parses these to decide work-unit
+// timeouts, so the format must match for the in-process swap to interoperate.
+fn now_dt() -> String {
+    chrono::Utc::now().format("%Y-%m-%d %H:%M:%S%.6f").to_string()
+}
+// A timestamp `secs` seconds in the past, same format -- used (with lexical
+// comparison, which is valid for this zero-padded format) to find stale rows.
+fn dt_secs_ago(secs: u64) -> String {
+    (chrono::Utc::now() - chrono::Duration::seconds(secs as i64))
+        .format("%Y-%m-%d %H:%M:%S%.6f")
+        .to_string()
 }
 
 fn sanitize(name: &str) -> String {

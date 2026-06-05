@@ -2,6 +2,11 @@
 resolver = "2"
 members = ["cado-nfs-client", "cado-wu-server"]
 
+# Profiles must live at the workspace root (member [profile.*] are ignored).
+[profile.release]
+strip = true
+lto = true
+
 # Rust orchestration layer for CADO-NFS (Phase 4 of the 3.0.0-modern fork).
 # The work-unit protocol is the existing Python one (scripts/cadofactor/
 # api_server.py + workunit.py), so these binaries interoperate with the stock
