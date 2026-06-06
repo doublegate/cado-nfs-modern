@@ -197,6 +197,17 @@ Work in progress — see the v3.1.0 roadmap. Landed so far:
   AVX-512 hardware. Remaining (perf-gated): port `mul2`–`mul9` to VPCLMULQDQ +
   threshold retune (see `gf2x/already_tuned/x86_64_vpclmul/INTEGRATION.md`).
 
+### CPU (Track 1.2) — PGO retry (honest negative)
+
+- **Siever-trained PGO retry — rejected again.** v3.0.0 rejected whole-program PGO
+  (+2.8% slower). This retry instrumented only the `las` objects
+  (`-fprofile-generate`), trained on a multi-seed c120 sampled-special-q corpus,
+  then rebuilt with `-fprofile-use` (gcc; `-fprofile-partial-training` so the rest
+  stays `-O3`). Measured on `bench/las-microbench.sh` (deterministic, <1%
+  variance): **12.04s vs 11.69s baseline = +3.0% slower** — no win, consistent
+  with v3.0.0. The `-O3 -march=native` host-ISA codegen already captures the gain;
+  PGO's layout/inlining choices do not help this siever. Recorded, not adopted.
+
 ### UI/UX (Track 3.1) — run-status reporting
 
 - **`--json-status FILE`** writes a machine-readable status snapshot (schema
