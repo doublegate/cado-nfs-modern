@@ -43,6 +43,15 @@ Work in progress — see the v3.1.0 roadmap. Landed so far:
   **strips a planted ~20-bit factor from near-full-width composites** (~520k /
   135k / 30k curves/s for 128/256/512-bit on an RTX 3090). This is the math
   foundation for the standalone `--gpu-prefactor` stage.
+- **Standalone `gpu-prefactor` tool** (`misc/gpu_prefactor/`): a working CLI that
+  strips factors from a decimal `N` on the GPU before NFS (which CADO already
+  tells users to do by hand). Width `K ∈ {2,4,8,16}` (up to ~307-digit `N`) is
+  chosen automatically; GMP handles parsing, the Montgomery setup, and `gcd`.
+  Demonstrated stripping a 12-digit factor from a 103-digit `N` (cofactor
+  correctly identified prime). Unlike in-sieve GPU cofactorization (a documented
+  Amdahl no-win), pre-factoring is a *separate* stage, so the GPU throughput is
+  pure upside. Stage-1 only so far; stage-2 BSGS + Suyama, multi-GPU, the
+  `cado-nfs.py --gpu-prefactor` hook, and a CMake target are the next increments.
 
 ## [3.0.0-modern] — 2026-06-05
 
