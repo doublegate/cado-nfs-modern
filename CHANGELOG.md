@@ -8,7 +8,27 @@ This is a downstream **modernization + performance fork** of upstream
 [CADO-NFS](https://gitlab.inria.fr/cado-nfs/cado-nfs). The `3.0.x-modern` line is
 rebased onto upstream **3.0.0**; only the changes introduced by this fork are
 listed. For the upstream history see [`NEWS`](NEWS). The earlier `2.3.1-modern`
-release (rebased on upstream 2.3.0) lives on the `main` branch.
+release (rebased on upstream 2.3.0) is preserved under the `v2.3.1-modern` tag;
+`main` now tracks the latest release (`3.1.0-modern`).
+
+## [Unreleased]
+
+Post-`3.1.0-modern` housekeeping (no code/behaviour change):
+
+- **Project renamed to `cado-nfs-modern`.** Both the local checkout and the
+  GitHub repository were renamed `cado-nfs-3.0.0-modern` → `cado-nfs-modern`
+  (GitHub auto-redirects the old URL); the repo's About blurb was reworded.
+  `main` was fast-forwarded to the `3.1.0-modern` release tip and is the default
+  branch; the interim `v3.1.0-dev` / `v3-modern` branches were removed (all
+  contained in `main`; release tags retained).
+- **README** rebannered to 3.1.0-modern: badges/links point at `cado-nfs-modern`
+  (+ an AVX-512-validation CI badge and a release badge), a "New in 3.1.0-modern"
+  section (GPU linalg, GPU pre-factoring, AVX-512 VPCLMULQDQ/IFMA,
+  orchestration/UX), a GPU performance note, and the new docs in the index.
+- **`.gitignore`** hardened: standalone bench binaries built into the repo root
+  (`gpu-prefactor`, `ifma-modmul`, `gpu-spmv-bench`, …), PGO/profiling artifacts
+  (`*.gcda`/`*.gcno`/`*.profraw`/`perf.data`), `--json-status` snapshots,
+  `autom4te.cache/`, and editor/OS cruft.
 
 ## [3.1.0-modern] — 2026-06-06
 

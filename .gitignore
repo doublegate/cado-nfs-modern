@@ -16,3 +16,37 @@ __pycache__/
 
 # Local Python venv for the 3.0.0 orchestrator (created by scripts/setup-venv.sh)
 /cado-nfs.venv/
+
+# Standalone validation/bench binaries the docs build straight into the repo
+# root (e.g. `nvcc ... -o gpu-prefactor`, `gcc ... -o ifma-modmul`). These are
+# disposable artifacts, never committed -- the sources live in bench/.
+/gpu-prefactor
+/gpu-prefactor-bench
+/gpu-spmv-bench
+/spmv-sweep
+/gpu-vecreduce-bench
+/gpu-addmul-bench
+/gpu-xdotprod-bench
+/ifma-modmul
+/vpclmul-test
+/bench-*
+
+# Profiling / PGO artifacts (gcc -fprofile-generate/-use, perf, gcov)
+*.gcda
+*.gcno
+*.profraw
+*.profdata
+perf.data
+perf.data.old
+
+# Machine-readable run-status snapshots (cado-nfs.py --json-status FILE)
+/status.json
+
+# autotools regeneration leftovers (autoreconf in gf2x/) and editor/OS cruft
+autom4te.cache/
+*.orig
+*~
+*.swp
+.DS_Store
+core
+core.*
