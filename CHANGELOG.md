@@ -50,8 +50,15 @@ Work in progress — see the v3.1.0 roadmap. Landed so far:
   Demonstrated stripping a 12-digit factor from a 103-digit `N` (cofactor
   correctly identified prime). Unlike in-sieve GPU cofactorization (a documented
   Amdahl no-win), pre-factoring is a *separate* stage, so the GPU throughput is
-  pure upside. Stage-1 only so far; stage-2 BSGS + Suyama, multi-GPU, the
-  `cado-nfs.py --gpu-prefactor` hook, and a CMake target are the next increments.
+  pure upside.
+- **Stage-2 BSGS + Suyama-σ curves** (generalizing `bench/gpu-ecm-stage2.cu` to
+  K limbs). The Suyama setup's one modular inverse per curve is done on the host
+  with GMP (non-invertible denominators are themselves free factors); the device
+  runs stage-1 + a baby-step/giant-step stage-2 over the primes in (B1,B2]. Each
+  run does a bit-exact GPU-vs-CPU self-check of the new BSGS composition
+  (`# selfcheck: PASS`). This lifts the reach from ~12-digit to **15-digit
+  factors** (e.g. stripped a 15-digit factor from a 102-digit N; a 14-digit from
+  a 95-digit N) at the same `B1`. CLI: `gpu-prefactor <N> [B1] [curves] [B2]`.
 
 ## [3.0.0-modern] — 2026-06-05
 

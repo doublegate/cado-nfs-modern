@@ -39,83 +39,132 @@ static void from_limbs(mpz_t v, const u64 *in, int K){
     mpz_import(v, K, -1, 8, 0, 0, in);
 }
 
-/* Launch `lanes` ECM curves on N (K limbs) on the GPU; return Z[lane*K..]. */
-template<int K>
-static bool run_curves(const u64 *Nl, u64 np, const u64 *R1, const u64 *R2,
-                       const std::vector<u64> &seeds, const std::vector<u64> &spow,
-                       std::vector<u64> &Zout, double &curves_per_s){
-    int lanes=(int)seeds.size(), ns=(int)spow.size();
-    std::vector<u64> N(lanes*K), R1v(lanes*K), R2v(lanes*K), SEED(lanes*K);
-    std::vector<u64> NP(lanes);
-    for(int i=0;i<lanes;i++){
-        mp_copy<K>(&N[i*K], Nl); mp_copy<K>(&R1v[i*K], R1); mp_copy<K>(&R2v[i*K], R2);
-        NP[i]=np;
-        u64 *sd=&SEED[i*K]; mp_set0<K>(sd); sd[0]=seeds[i];
-    }
-    u64 *dN,*dNP,*dR1,*dR2,*dSEED,*ds,*dZ;
-    if(cudaMalloc(&dN,(size_t)lanes*K*8)!=cudaSuccess) return false;
-    cudaMalloc(&dNP,lanes*8); cudaMalloc(&dR1,(size_t)lanes*K*8);
-    cudaMalloc(&dR2,(size_t)lanes*K*8); cudaMalloc(&dSEED,(size_t)lanes*K*8);
-    cudaMalloc(&dZ,(size_t)lanes*K*8); cudaMalloc(&ds,ns*8);
-    cudaMemcpy(dN,N.data(),(size_t)lanes*K*8,cudaMemcpyHostToDevice);
-    cudaMemcpy(dNP,NP.data(),lanes*8,cudaMemcpyHostToDevice);
-    cudaMemcpy(dR1,R1v.data(),(size_t)lanes*K*8,cudaMemcpyHostToDevice);
-    cudaMemcpy(dR2,R2v.data(),(size_t)lanes*K*8,cudaMemcpyHostToDevice);
-    cudaMemcpy(dSEED,SEED.data(),(size_t)lanes*K*8,cudaMemcpyHostToDevice);
-    cudaMemcpy(ds,spow.data(),ns*8,cudaMemcpyHostToDevice);
-    int tpb=64, blk=(lanes+tpb-1)/tpb;
-    auto t0=std::chrono::steady_clock::now();
-    ecm_kernel<K><<<blk,tpb>>>(dN,dNP,dR1,dR2,dSEED,ds,ns,dZ,lanes);
-    cudaDeviceSynchronize();
-    auto t1=std::chrono::steady_clock::now();
-    cudaError_t e=cudaGetLastError();
-    Zout.resize((size_t)lanes*K);
-    cudaMemcpy(Zout.data(),dZ,(size_t)lanes*K*8,cudaMemcpyDeviceToHost);
-    double sec=std::chrono::duration<double>(t1-t0).count();
-    curves_per_s = sec>0 ? lanes/sec : 0;
-    cudaFree(dN);cudaFree(dNP);cudaFree(dR1);cudaFree(dR2);cudaFree(dSEED);cudaFree(dZ);cudaFree(ds);
-    return e==cudaSuccess;
+/* Suyama-sigma curve setup mod N (GMP): sigma -> (X0,Z0,a24). Returns true and
+ * fills X0/Z0/a24; if a denominator is not invertible mod N, returns false and
+ * sets `lucky` = gcd(denominator,N), itself a nontrivial factor. */
+static bool suyama_setup(mpz_t X0,mpz_t Z0,mpz_t a24,mpz_t lucky,
+                         unsigned long sigma,const mpz_t N){
+    mpz_t s,u,v,u3,num,den,t1,di; mpz_inits(s,u,v,u3,num,den,t1,di,NULL);
+    mpz_set_ui(s,sigma); mpz_mod(s,s,N);
+    mpz_mul(u,s,s); mpz_sub_ui(u,u,5); mpz_mod(u,u,N);          /* u = s^2 - 5 */
+    mpz_mul_ui(v,s,4); mpz_mod(v,v,N);                          /* v = 4 s   */
+    mpz_powm_ui(u3,u,3,N);                                      /* u^3       */
+    mpz_set(X0,u3);                                             /* X0 = u^3  */
+    mpz_powm_ui(Z0,v,3,N);                                      /* Z0 = v^3  */
+    mpz_sub(t1,v,u); mpz_powm_ui(t1,t1,3,N);                    /* (v-u)^3   */
+    mpz_mul_ui(num,u,3); mpz_add(num,num,v); mpz_mod(num,num,N);/* 3u+v      */
+    mpz_mul(num,num,t1); mpz_mod(num,num,N);                    /* (v-u)^3(3u+v) */
+    mpz_mul(den,u3,v); mpz_mul_ui(den,den,16); mpz_mod(den,den,N); /* 16 u^3 v */
+    bool ok=true;
+    if(mpz_invert(di,den,N)==0){ mpz_gcd(lucky,den,N); ok=false; }
+    else { mpz_mul(a24,num,di); mpz_mod(a24,a24,N); }
+    mpz_clears(s,u,v,u3,num,den,t1,di,NULL);
+    return ok;
 }
 
-/* One GPU ECM pass on N at the chosen width K; append any nontrivial gcd factors. */
+/* One GPU ECM pass (stage1 to B1 + stage2 BSGS to B2, Suyama curves) on N at the
+ * chosen width K; append any nontrivial factors (gcd of z1 or g2 with N, plus
+ * Suyama lucky factors). */
 template<int K>
-static bool ecm_pass(const mpz_t N, unsigned long B1, int ncurves,
-                     const std::vector<u64> &spow,
+static bool ecm_pass(const mpz_t N, int ncurves,
+                     const std::vector<u64> &spow, const std::vector<u64> &pr,
                      std::vector<std::string> &found, double &cps){
-    (void)B1;
+    int ns=(int)spow.size(), npr=(int)pr.size();
     u64 Nl[K]; to_limbs(Nl, K, N);
     u64 np = ninv64(Nl[0]);
     mpz_t t,R1m,R2m,g,z; mpz_inits(t,R1m,R2m,g,z,NULL);
-    mpz_setbit(t, 64*K); mpz_mod(R1m, t, N);              /* R mod n */
-    mpz_set_ui(t,0); mpz_setbit(t,128*K); mpz_mod(R2m, t, N); /* R^2 mod n */
+    mpz_setbit(t, 64*K); mpz_mod(R1m, t, N);
+    mpz_set_ui(t,0); mpz_setbit(t,128*K); mpz_mod(R2m, t, N);
     u64 R1[K],R2[K]; to_limbs(R1,K,R1m); to_limbs(R2,K,R2m);
-    std::vector<u64> seeds(ncurves);
-    for(int i=0;i<ncurves;i++) seeds[i]=(u64)(2+i*2654435761u % 1000003);  /* varied a24 */
-    std::vector<u64> Z;
-    bool ok = run_curves<K>(Nl,np,R1,R2,seeds,spow,Z,cps);
+
+    /* per-curve Suyama setup on the host */
+    std::vector<u64> X0(ncurves*K), Z0(ncurves*K), A24(ncurves*K);
+    mpz_t mx,mz,ma,luck; mpz_inits(mx,mz,ma,luck,NULL);
     bool any=false;
-    if(ok){
-        for(int i=0;i<ncurves;i++){
-            from_limbs(z,&Z[(size_t)i*K],K);
-            mpz_gcd(g,z,N);
-            if(mpz_cmp_ui(g,1)>0 && mpz_cmp(g,N)<0){
-                char *s=mpz_get_str(NULL,10,g);
-                std::string fac(s); free(s);
-                bool dup=false; for(auto&f:found) if(f==fac) dup=true;
-                if(!dup){ found.push_back(fac); any=true; }
-            }
+    auto add_factor=[&](const mpz_t f){
+        if(mpz_cmp_ui(f,1)>0 && mpz_cmp(f,N)<0){
+            char *s=mpz_get_str(NULL,10,f); std::string fac(s); free(s);
+            for(auto&x:found) if(x==fac) return; found.push_back(fac); any=true; }
+    };
+    for(int i=0;i<ncurves;i++){
+        unsigned long sigma = 6 + (unsigned long)i*2 + 1;       /* distinct sigmas */
+        if(suyama_setup(mx,mz,ma,luck,sigma,N)){
+            to_limbs(&X0[i*K],K,mx); to_limbs(&Z0[i*K],K,mz); to_limbs(&A24[i*K],K,ma);
+        } else {
+            add_factor(luck);                                  /* free factor */
+            /* fall back to a POC curve for this lane so the kernel has valid data */
+            mpz_set_ui(mx,2); mpz_set_ui(mz,1); mpz_set_ui(ma,sigma);
+            to_limbs(&X0[i*K],K,mx); to_limbs(&Z0[i*K],K,mz); to_limbs(&A24[i*K],K,ma);
         }
     }
+    mpz_clears(mx,mz,ma,luck,NULL);
+
+    /* device arrays */
+    std::vector<u64> Nv(ncurves*K),R1v(ncurves*K),R2v(ncurves*K),NPv(ncurves);
+    for(int i=0;i<ncurves;i++){ mp_copy<K>(&Nv[i*K],Nl); mp_copy<K>(&R1v[i*K],R1);
+        mp_copy<K>(&R2v[i*K],R2); NPv[i]=np; }
+    u64 *dN,*dNP,*dR1,*dR2,*dX0,*dZ0,*dA24,*ds,*dpr,*dZ1,*dG2;
+    bool ok = cudaMalloc(&dN,(size_t)ncurves*K*8)==cudaSuccess;
+    cudaMalloc(&dNP,ncurves*8); cudaMalloc(&dR1,(size_t)ncurves*K*8);
+    cudaMalloc(&dR2,(size_t)ncurves*K*8); cudaMalloc(&dX0,(size_t)ncurves*K*8);
+    cudaMalloc(&dZ0,(size_t)ncurves*K*8); cudaMalloc(&dA24,(size_t)ncurves*K*8);
+    cudaMalloc(&dZ1,(size_t)ncurves*K*8); cudaMalloc(&dG2,(size_t)ncurves*K*8);
+    cudaMalloc(&ds,ns>0?ns*8:8); cudaMalloc(&dpr,npr>0?npr*8:8);
+    cudaMemcpy(dN,Nv.data(),(size_t)ncurves*K*8,cudaMemcpyHostToDevice);
+    cudaMemcpy(dNP,NPv.data(),ncurves*8,cudaMemcpyHostToDevice);
+    cudaMemcpy(dR1,R1v.data(),(size_t)ncurves*K*8,cudaMemcpyHostToDevice);
+    cudaMemcpy(dR2,R2v.data(),(size_t)ncurves*K*8,cudaMemcpyHostToDevice);
+    cudaMemcpy(dX0,X0.data(),(size_t)ncurves*K*8,cudaMemcpyHostToDevice);
+    cudaMemcpy(dZ0,Z0.data(),(size_t)ncurves*K*8,cudaMemcpyHostToDevice);
+    cudaMemcpy(dA24,A24.data(),(size_t)ncurves*K*8,cudaMemcpyHostToDevice);
+    if(ns>0) cudaMemcpy(ds,spow.data(),ns*8,cudaMemcpyHostToDevice);
+    if(npr>0) cudaMemcpy(dpr,pr.data(),npr*8,cudaMemcpyHostToDevice);
+    int tpb=64, blk=(ncurves+tpb-1)/tpb;
+    auto t0=std::chrono::steady_clock::now();
+    ecm_kernel2<K><<<blk,tpb>>>(dN,dNP,dR1,dR2,dX0,dZ0,dA24,ds,ns,dpr,npr,dZ1,dG2,ncurves);
+    cudaDeviceSynchronize();
+    auto t1=std::chrono::steady_clock::now();
+    if(cudaGetLastError()!=cudaSuccess) ok=false;
+    std::vector<u64> Z1(ncurves*K),G2(ncurves*K);
+    cudaMemcpy(Z1.data(),dZ1,(size_t)ncurves*K*8,cudaMemcpyDeviceToHost);
+    cudaMemcpy(G2.data(),dG2,(size_t)ncurves*K*8,cudaMemcpyDeviceToHost);
+    double sec=std::chrono::duration<double>(t1-t0).count();
+    cps = sec>0 ? ncurves/sec : 0;
+    /* bit-exact self-check: re-run a subset on the CPU (ecm_run2 is host+device)
+     * and compare z1/g2. The stage-2 BSGS is a new composition of the validated
+     * primitives, so verify it every run (cheap; honors the fork's ethos). */
+    if(ok){
+        int chk = ncurves<32?ncurves:32; long mis=0;
+        for(int i=0;i<chk;i++){
+            u64 z1[K],g2[K];
+            ecm_run2<K>(z1,g2,&Nv[i*K],NPv[i],&R1v[i*K],&R2v[i*K],
+                        &X0[i*K],&Z0[i*K],&A24[i*K],spow.data(),ns,pr.data(),npr);
+            for(int j=0;j<K;j++) if(z1[j]!=Z1[i*K+j]||g2[j]!=G2[i*K+j]){ mis++; break; }
+        }
+        printf("# selfcheck: %s (%ld/%d GPU lanes differ from CPU)\n",
+               mis==0?"PASS":"FAIL", mis, chk);
+        if(mis) ok=false;
+    }
+    if(ok){
+        for(int i=0;i<ncurves;i++){
+            from_limbs(z,&Z1[(size_t)i*K],K); mpz_gcd(g,z,N); add_factor(g);
+            from_limbs(z,&G2[(size_t)i*K],K); mpz_gcd(g,z,N); add_factor(g);
+        }
+    }
+    cudaFree(dN);cudaFree(dNP);cudaFree(dR1);cudaFree(dR2);cudaFree(dX0);cudaFree(dZ0);
+    cudaFree(dA24);cudaFree(dZ1);cudaFree(dG2);cudaFree(ds);cudaFree(dpr);
     mpz_clears(t,R1m,R2m,g,z,NULL);
     return any;
 }
 
 int main(int argc, char**argv){
-    if(argc<2){ fprintf(stderr,"usage: %s <N> [B1=50000] [curves=4096]\n",argv[0]); return 2; }
+    if(argc<2){ fprintf(stderr,"usage: %s <N> [B1=50000] [curves=4096] [B2=100*B1]\n",argv[0]); return 2; }
     mpz_t N; mpz_init(N);
     if(mpz_set_str(N, argv[1], 10)!=0){ fprintf(stderr,"bad N\n"); return 2; }
     unsigned long B1 = argc>2 ? strtoul(argv[2],0,10) : 50000;
     int ncurves      = argc>3 ? atoi(argv[3]) : 4096;
+    unsigned long B2 = argc>4 ? strtoul(argv[4],0,10) : 100UL*B1;
+    if(B2<B1) B2=B1;
 
     size_t bits = mpz_sizeinbase(N,2);
     int needK = (int)((bits+2+63)/64);
@@ -123,22 +172,26 @@ int main(int argc, char**argv){
     if(K==0){ fprintf(stderr,"N too large (%zu bits); supported up to 1022 bits (~307 digits)\n",bits); return 2; }
     if(mpz_even_p(N)){ fprintf(stderr,"N is even; strip factors of 2 first\n"); return 2; }
 
-    /* prime powers <= B1 */
-    std::vector<u64> spow; std::vector<char> comp(B1+1,0);
-    for(unsigned long p=2;p<=B1;p++) if(!comp[p]){ for(unsigned long q=p*p;q<=B1;q+=p) comp[q]=1;
-        u64 pe=p; while(pe*p<=B1) pe*=p; spow.push_back(pe); }
+    /* sieve to B2: stage-1 prime powers <= B1, stage-2 primes in (B1,B2] */
+    std::vector<u64> spow, pr; std::vector<char> comp(B2+1,0);
+    for(unsigned long p=2;p<=B2;p++) if(!comp[p]){
+        for(unsigned long q=p*p;q<=B2;q+=p) comp[q]=1;
+        if(p<=B1){ u64 pe=p; while(pe*p<=B1) pe*=p; spow.push_back(pe); }
+        else pr.push_back(p);
+    }
 
-    printf("# GPU ECM pre-factor: %zu-bit N (~%zu digits), width K=%d (%d-bit), B1=%lu, curves=%d, %zu multipliers\n",
-           bits, mpz_sizeinbase(N,10), K, 64*K, B1, ncurves, spow.size());
+    printf("# GPU ECM pre-factor: %zu-bit N (~%zu digits), width K=%d (%d-bit), B1=%lu, B2=%lu, curves=%d (Suyama+stage2)\n",
+           bits, mpz_sizeinbase(N,10), K, 64*K, B1, B2, ncurves);
+    printf("#   %zu stage-1 multipliers, %zu stage-2 primes\n", spow.size(), pr.size());
 
     std::vector<std::string> found; double cps=0; bool any=false;
     switch(K){
-        case 2:  any=ecm_pass<2 >(N,B1,ncurves,spow,found,cps); break;
-        case 4:  any=ecm_pass<4 >(N,B1,ncurves,spow,found,cps); break;
-        case 8:  any=ecm_pass<8 >(N,B1,ncurves,spow,found,cps); break;
-        case 16: any=ecm_pass<16>(N,B1,ncurves,spow,found,cps); break;
+        case 2:  any=ecm_pass<2 >(N,ncurves,spow,pr,found,cps); break;
+        case 4:  any=ecm_pass<4 >(N,ncurves,spow,pr,found,cps); break;
+        case 8:  any=ecm_pass<8 >(N,ncurves,spow,pr,found,cps); break;
+        case 16: any=ecm_pass<16>(N,ncurves,spow,pr,found,cps); break;
     }
-    printf("# throughput: %.0f curves/s on the GPU\n", cps);
+    printf("# throughput: %.0f curves/s on the GPU (stage1+stage2)\n", cps);
 
     /* divide out everything found; report factors + remaining cofactor */
     mpz_t cof; mpz_init_set(cof,N);

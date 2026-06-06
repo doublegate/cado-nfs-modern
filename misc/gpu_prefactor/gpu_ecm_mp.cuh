@@ -92,11 +92,62 @@ template<int K> HD void ecm_stage1(u64 *zout,const u64 *n,u64 np,
     montmul<K>(zout,P.Z,one,n,np);
 }
 
+/* ---- stage 1 (from a given curve point) + stage-2 BSGS ----
+ * X0,Z0,a24 are plain integers mod n (the host does the POC or Suyama-sigma
+ * setup, incl. the one modular inverse Suyama needs, with GMP). The device
+ * converts to Montgomery, runs stage 1 to Q=[prod s]P, then a baby-step/
+ * giant-step stage 2 over the primes pr[] in (B1,B2]. Returns the leave-
+ * Montgomery Z of Q (z1out) and the stage-2 cross-difference product (g2out);
+ * the host gcds both with n. Generalizes bench/gpu-ecm-stage2.cu to K limbs. */
+#define GPU_ECM_MP_W 32                     /* baby-step table size (bounds local mem) */
+
+template<int K> HD void ecm_run2(u64 *z1out,u64 *g2out,
+        const u64 *n,u64 np,const u64 *R1,const u64 *R2,
+        const u64 *X0,const u64 *Z0,const u64 *a24,
+        const u64 *s,int ns,const u64 *pr,int npr){
+    const int W=GPU_ECM_MP_W;
+    PT<K> P; u64 a24m[K];
+    montmul<K>(P.X,X0,R2,n,np); montmul<K>(P.Z,Z0,R2,n,np);  /* -> Montgomery */
+    montmul<K>(a24m,a24,R2,n,np);
+    u64 one[K]; mp_set0<K>(one); one[0]=1;
+    /* stage 1: Q = [prod s]P */
+    for(int i=0;i<ns;i++){ PT<K> t; ladder<K>(t,P,s[i],a24m,n,np); P=t; }
+    PT<K> Q=P;
+    montmul<K>(z1out,Q.Z,one,n,np);
+    /* stage 2 BSGS */
+    if(npr<=0){ mp_copy<K>(g2out,R1); return; }     /* g2 == 1 (Montgomery) */
+    PT<K> T[W];
+    T[1]=Q; cdbl<K>(T[2],Q,a24m,n,np);
+    for(int r=3;r<W;r++) cadd<K>(T[r],T[r-1],Q,T[r-2],n,np);  /* T[r]=[r]Q */
+    PT<K> Wg; ladder<K>(Wg,Q,(u64)W,a24m,n,np);              /* [W]Q */
+    int m=(int)((pr[0]+W-1)/W);
+    PT<K> V,Vp; ladder<K>(V,Q,(u64)m*W,a24m,n,np); ladder<K>(Vp,Q,(u64)(m-1)*W,a24m,n,np);
+    u64 g[K]; mp_copy<K>(g,R1);                              /* accumulator = 1 (Mont) */
+    for(int k=0;k<npr;k++){
+        u64 p=pr[k]; int mp=(int)((p+W-1)/W);
+        while(m<mp){ PT<K> Vn; cadd<K>(Vn,V,Wg,Vp,n,np); Vp=V; V=Vn; m++; }
+        int r=m*W-(int)p;
+        if(r<=0||r>=W) continue;
+        u64 t1[K],t2[K],diff[K];
+        montmul<K>(t1,V.X,T[r].Z,n,np); montmul<K>(t2,T[r].X,V.Z,n,np);
+        submod<K>(diff,t1,t2,n);
+        montmul<K>(g,g,diff,n,np);
+    }
+    montmul<K>(g2out,g,one,n,np);
+}
+
 #ifdef __CUDACC__
 template<int K> __global__ void ecm_kernel(const u64*N,const u64*NP,const u64*R1,
                 const u64*R2,const u64*SEED,const u64*s,int ns,u64*Z,int lanes){
     int i=blockIdx.x*blockDim.x+threadIdx.x; if(i>=lanes) return;
     ecm_stage1<K>(Z+i*K,N+i*K,NP[i],R1+i*K,R2+i*K,SEED+i*K,s,ns);
+}
+template<int K> __global__ void ecm_kernel2(const u64*N,const u64*NP,const u64*R1,
+                const u64*R2,const u64*X0,const u64*Z0,const u64*A24,
+                const u64*s,int ns,const u64*pr,int npr,u64*Z1,u64*G2,int lanes){
+    int i=blockIdx.x*blockDim.x+threadIdx.x; if(i>=lanes) return;
+    ecm_run2<K>(Z1+i*K,G2+i*K,N+i*K,NP[i],R1+i*K,R2+i*K,
+                X0+i*K,Z0+i*K,A24+i*K,s,ns,pr,npr);
 }
 #endif
 
