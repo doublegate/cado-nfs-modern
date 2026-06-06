@@ -201,6 +201,60 @@ if __name__ == '__main__':
                 " it can be resumed with %s %s",
                 sys.argv[0], snapshot_filename)
 
+    # GPU pre-NFS factoring stage (Track 2.1): strip small/medium factors on the
+    # GPU before NFS. If it fully factors N, skip NFS; if a composite cofactor
+    # remains, finish it with a fresh cado-nfs.py run (which picks parameters for
+    # the cofactor's size). Falls through to a normal run if nothing is stripped
+    # or the GPU binary is absent.
+    if getattr(toplevel_params.args, "gpu_prefactor", False) and \
+            parameters.myparams({"computation": ""}, "").get("computation") \
+            in (Computation.FACT, "FACT", None):
+        from cadofactor import gpu_prefactor as _gp
+        _binary = _gp.find_binary(pathdict)
+        if not _binary:
+            logger.warning("--gpu-prefactor: gpu-prefactor binary not found "
+                           "(build with -DENABLE_GPU=ON); running NFS normally")
+        else:
+            _N = int(parameters.get_or_set_default("N"))
+            _primes, _cof = _gp.run(_binary, _N, toplevel_params.args.gpu_b1,
+                                    toplevel_params.args.gpu_curves,
+                                    toplevel_params.args.gpu_b2, logger)
+            if _primes:
+                logger.info("GPU pre-factoring stripped: %s",
+                            " ".join(str(p) for p in _primes))
+                if _cof == 1 or _gp.is_probable_prime(_cof):
+                    _all = sorted(_primes + ([_cof] if _cof > 1 else []))
+                    logger.info("Factored entirely by the GPU pre-stage; "
+                                "skipping NFS")
+                    STATUS.finish(factors=[str(x) for x in _all], state="done")
+                    print(" ".join(str(x) for x in _all))
+                    toplevel_params.purge_temp_files()
+                    sys.exit(0)
+                logger.info("Composite %d-digit cofactor remains; finishing it "
+                            "with NFS", len(str(_cof)))
+                _sub = [sys.executable, os.path.abspath(sys.argv[0])]
+                _skip = False
+                for _a in sys.argv[1:]:
+                    if _skip:
+                        _skip = False
+                        continue
+                    if _a == "--gpu-prefactor":
+                        continue
+                    if _a in ("--gpu-b1", "--gpu-b2", "--gpu-curves"):
+                        _skip = True
+                        continue
+                    if _a.startswith("--gpu-") and "=" in _a:
+                        continue
+                    _sub.append(str(_cof) if _a == str(_N) else _a)
+                _r = subprocess.run(_sub, stdout=subprocess.PIPE, text=True)
+                _subfac = _r.stdout.split() if _r.returncode == 0 else []
+                _all = sorted(_primes + [int(x) for x in _subfac if x.isdigit()])
+                STATUS.finish(factors=[str(x) for x in _all],
+                              state="done" if _subfac else "error")
+                print(" ".join(str(x) for x in _all))
+                toplevel_params.purge_temp_files(nopurge=not _subfac)
+                sys.exit(0 if _subfac else 1)
+
     factorjob = cadotask.CompleteFactorization(db=db,
                                                parameters=parameters,
                                                path_prefix=[])

@@ -62,15 +62,28 @@ remaining cofactor: 846741333…725265224027430410085313  (prime)
 Exit code `0` if at least one factor was stripped, `1` if none was found (try a
 larger `B1` / more curves), `2` on a usage/size error.
 
+## Integrated use (cado-nfs.py)
+
+```bash
+cado-nfs.py <N> --gpu-prefactor [--gpu-b1 50000] [--gpu-b2 5000000] [--gpu-curves 8192]
+```
+
+Runs this stage before NFS. If it fully factors N (cofactor 1 or prime), it
+prints the factorization and **skips NFS**; if a composite cofactor remains, it
+finishes with a fresh `cado-nfs.py` on the cofactor; if nothing is stripped (or
+the binary isn't built), it falls through to a normal NFS run. Example: a
+90-digit N that is a 14-digit prime × a 76-digit prime is factored entirely by
+the GPU in seconds, NFS skipped.
+
 ## Status & next increments
 
 - **Done & validated:** the multi-precision GPU ECM math (bit-exact); stage-1 +
   stage-2 BSGS + Suyama-σ curves (per-run GPU-vs-CPU self-check); multi-GPU
-  batching; and the CMake target (`-DENABLE_GPU=ON`, device `-O3`, `sm_86`).
-- **Next (Track 2.1):** a `cado-nfs.py --gpu-prefactor` pre-stage (run this,
-  substitute the reduced cofactor, recombine the stripped factors at the end);
-  and a benchmark vs CPU GMP-ECM across factor sizes.
+  batching; the CMake target (`-DENABLE_GPU=ON`, device `-O3`, `sm_86`); and the
+  `cado-nfs.py --gpu-prefactor` integration (fast-path skip + cofactor
+  continuation).
+- **Next (Track 2.1):** a staged-`B1` schedule for larger factors, and a
+  benchmark vs CPU GMP-ECM across factor sizes.
 
 Reach today: ~15-digit factors at `B1=50000`; raising `B1`/`B2`/`curves` extends
-it (the usual ECM trade-off). Larger factors want the standard staged-`B1`
-schedule, a follow-up.
+it (the usual ECM trade-off).

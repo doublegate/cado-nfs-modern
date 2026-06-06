@@ -1322,6 +1322,19 @@ class Cado_NFS_toplevel(object):
                  "a clean line.",
             action='store_true')
         parser.add_argument(
+            "--gpu-prefactor",
+            help="Before NFS, strip small/medium factors with GPU ECM "
+                 "(misc/gpu_prefactor; needs a -DENABLE_GPU=ON build). If it "
+                 "fully factors N, NFS is skipped; otherwise NFS continues on "
+                 "the reduced cofactor.",
+            action='store_true')
+        parser.add_argument("--gpu-b1", type=int, default=50000,
+                            help="GPU ECM stage-1 bound for --gpu-prefactor")
+        parser.add_argument("--gpu-b2", type=int, default=0,
+                            help="GPU ECM stage-2 bound (0 = 100*B1)")
+        parser.add_argument("--gpu-curves", type=int, default=4096,
+                            help="GPU ECM curves for --gpu-prefactor")
+        parser.add_argument(
             "--dlp-no-keep", "-dlp-no-keep",
             help="Disable the feature that CADO_DEBUG"
                  " is set by default in dlp mode",

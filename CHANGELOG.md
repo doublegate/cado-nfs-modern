@@ -67,6 +67,16 @@ Work in progress — see the v3.1.0 roadmap. Landed so far:
   flags are unoptimized — a ~30× trap) and defaults to `sm_86`
   (`-DCADO_GPU_ARCH=` to override). The CMake build matches the standalone nvcc
   throughput (~550 curves/s, stage1+2, 512-bit on an RTX 3090).
+- **`cado-nfs.py --gpu-prefactor`** integration (`scripts/cadofactor/gpu_prefactor.py`):
+  runs the GPU stage before NFS, with `--gpu-b1/--gpu-b2/--gpu-curves`. If it
+  fully factors N (cofactor 1 or prime), it prints the factorization and **skips
+  NFS entirely**; if a composite cofactor remains, it finishes with a fresh
+  `cado-nfs.py` on the cofactor (which selects parameters for the cofactor's
+  size); if nothing is stripped or the GPU binary is absent, it falls through to
+  a normal run. Only prime gcd-divisors are trusted (verified by Miller–Rabin).
+  Validated: a 90-digit N (14-digit × 76-digit prime) was factored entirely by
+  the GPU pre-stage in seconds, **product == N**, NFS skipped; normal runs
+  without the flag are unaffected.
 
 ## [3.0.0-modern] — 2026-06-05
 
