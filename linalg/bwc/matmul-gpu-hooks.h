@@ -107,4 +107,17 @@ extern int (*cado_gpu_x_dotprod)(void * dst, uint32_t const * xv,
                                  unsigned int v_i0, unsigned int vi0, unsigned int vi1,
                                  int K);
 
+/* GPU addmul_tiny (Track 2.2, mksol residency): the device-resident accumulator
+ * update w += u x v over GF(2) (arith-cross addmul_tiny). w_host is ymy[0] (must be
+ * device-resident), u_host is vi[i] (must be device-current — uploaded per block),
+ * ff is the 64K x 64L coefficient slice (host, uploaded each call), n = eblock,
+ * own_off_items = the own-subvec offset. Both w and u are accessed at that offset
+ * (w element = L u64, u element = K u64). Returns 1 if handled on device, 0 to fall
+ * back to the host addmul. GF(2) only. */
+extern int (*cado_gpu_addmul_tiny)(void * w_host, void const * u_host,
+                                   void const * ff, unsigned int n,
+                                   unsigned int K, unsigned int L,
+                                   size_t own_off_items,
+                                   size_t w_buf_bytes, size_t u_buf_bytes);
+
 #endif /* CADO_MATMUL_GPU_HOOKS_H */

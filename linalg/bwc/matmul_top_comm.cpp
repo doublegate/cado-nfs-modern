@@ -34,6 +34,8 @@ int (*cado_gpu_dev_mark_resident)(void const *, size_t) = nullptr;
 int (*cado_gpu_x_dotprod)(void *, uint32_t const *, unsigned int, unsigned int,
                           unsigned int, void const *, size_t, unsigned int,
                           unsigned int, unsigned int, int) = nullptr;
+int (*cado_gpu_addmul_tiny)(void *, void const *, void const *, unsigned int,
+                            unsigned int, unsigned int, size_t, size_t, size_t) = nullptr;
 
 /* Our innermost communication routines are essentially all-gather and
  * reduce-scatter, following the MPI terminology. We provide several

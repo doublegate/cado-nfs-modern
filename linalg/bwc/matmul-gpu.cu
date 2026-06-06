@@ -400,6 +400,52 @@ int gpu_x_dotprod_impl(void * dst, uint32_t const * xv,
     return 1;
 }
 
+/* ---- GPU addmul_tiny (mksol device-resident accumulator) ---- */
+/* w[j*L+l] ^= XOR over k<K,i<64 of ((u[j*K+k]>>i)&1 ? v[(k*64+i)*L+l] : 0).
+ * Bit-exact with arith-cross.cpp addmul_tiny for GF(2) (bench/gpu-addmul-bench.cu). */
+__global__ void addmul_kernel(uint64_t * w, const uint64_t * u, const uint64_t * v,
+                              unsigned int n, unsigned int K, unsigned int L)
+{
+    size_t idx = (size_t) blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned int j = (unsigned int) (idx / L), l = (unsigned int) (idx % L);
+    if (j >= n) return;
+    uint64_t rx = 0;
+    for (unsigned int k = 0; k < K; k++) {
+        uint64_t a = u[(size_t) j * K + k];
+        const uint64_t * vv = v + (size_t) (k * 64) * L + l;
+        for (unsigned int i = 0; i < 64; i++) { rx ^= vv[0] & (~(uint64_t) 0 * (a & 1)); a >>= 1; vv += L; }
+    }
+    w[(size_t) j * L + l] ^= rx;
+}
+
+int gpu_addmul_tiny_impl(void * w_host, void const * u_host, void const * ff,
+                         unsigned int n, unsigned int K, unsigned int L,
+                         size_t own_off_items, size_t w_buf_bytes, size_t u_buf_bytes)
+{
+    if (n == 0) return 1;
+    GDV & gw = g_dv(w_host, w_buf_bytes);
+    GDV & gu = g_dv(u_host, u_buf_bytes);
+    if (!gw.d || !gw.current || !gu.d || !gu.current) return 0;   /* need both resident */
+
+    size_t const ff_words = (size_t) 64 * K * L;
+    static thread_local uint64_t * ff_dev = nullptr;
+    static thread_local size_t ff_n = 0;
+    if (ff_n < ff_words) {
+        if (ff_dev) cudaFree(ff_dev);
+        if (cudaMalloc(&ff_dev, ff_words * sizeof(uint64_t)) != cudaSuccess) { ff_dev = nullptr; ff_n = 0; return 0; }
+        ff_n = ff_words;
+    }
+    CUCHECK(cudaMemcpy(ff_dev, ff, ff_words * sizeof(uint64_t), cudaMemcpyHostToDevice));
+
+    uint64_t * w = gw.d + own_off_items * L;       /* w element = L u64 */
+    const uint64_t * u = gu.d + own_off_items * K; /* u element = K u64 */
+    int tpb = 64; size_t blk = ((size_t) n * L + tpb - 1) / tpb;
+    addmul_kernel<<<blk, tpb>>>(w, u, ff_dev, n, K, L);
+    CUCHECK(cudaGetLastError());
+    gw.host_dirty = true;       /* w modified on device; host copy stale */
+    return 1;
+}
+
 /* install the hooks exactly once */
 void gpu_install_hooks() {
     static bool done = false;
@@ -415,6 +461,7 @@ void gpu_install_hooks() {
     cado_gpu_dev_ensure = gpu_dev_ensure_impl;
     cado_gpu_dev_mark_resident = gpu_dev_mark_resident_impl;
     cado_gpu_x_dotprod = gpu_x_dotprod_impl;
+    cado_gpu_addmul_tiny = gpu_addmul_tiny_impl;
     /* residency is genuinely active only with both flags set */
     cado_gpu_residency_available =
         (getenv("CADO_GPU_VECRESIDENT") && getenv("CADO_GPU_DEVCOMM")) ? 1 : 0;

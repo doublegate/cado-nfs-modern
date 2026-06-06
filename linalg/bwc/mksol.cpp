@@ -22,6 +22,7 @@
 #include "macros.h"
 #include "matmul_top.hpp"
 #include "matmul_top_comm.hpp"
+#include "matmul-gpu-hooks.h"   // GPU addmul / residency for mksol (Track 2.2)
 #include "matmul_top_vec.hpp"
 #include "misc.h"
 #include "mmt_vector_pair.hpp"
@@ -96,6 +97,16 @@ static void * mksol_prog(parallelizing_info_ptr pi, cxx_param_list & pl, void * 
     /* allocate vectors (two batches): */
 
     mmt_vector_pair ymy(mmt, bw->dir);
+
+    /* GPU full-vector residency for mksol (Track 2.2): when residency is enabled
+     * and the accumulator ymy[0] is a shared vector (so the per-iteration
+     * mmt_vec_broadcast is a no-op), keep it device-resident across the inner loop
+     * — run the addmul on the GPU and let the matmul reuse the krylov residency
+     * path. GF(2) only (the GPU addmul is GF(2)). */
+    unsigned int const Kc = char2 ? (Av->simd_groupsize() / 64) : 0;
+    unsigned int const Lc = char2 ? (As->simd_groupsize() / 64) : 0;
+    bool const mksol_residency_ok = cado_gpu_residency_available
+        && cado_gpu_addmul_tiny != nullptr && char2 && mmt_vec_is_shared(ymy[0]);
 
     /* {{{ For the vectors which we read from disk and which participate in
      *   the coefficients which get added to the computation at each
@@ -270,6 +281,19 @@ static void * mksol_prog(parallelizing_info_ptr pi, cxx_param_list & pl, void * 
 
         mmt_full_vec_set_zero(ymy[0]);
 
+        /* GPU residency: seed the device with the constant-per-block vi[i] and the
+         * zeroed accumulator, then activate residency for the inner loop (the
+         * addmul + matmul stay on device; ymy[0] is materialised at block end). */
+        if (mksol_residency_ok) {
+            size_t const w_buf = (size_t)(ymy[0].i1 - ymy[0].i0) * As->vec_elt_stride(1);
+            for (int i = 0 ; i < bw->n / splitwidth ; i++) {
+                size_t const u_buf = (size_t)(vi[i].i1 - vi[i].i0) * Av->vec_elt_stride(1);
+                cado_gpu_dev_upload(vi[i].v, u_buf);
+            }
+            cado_gpu_dev_upload(ymy[0].v, w_buf);   /* zeroed accumulator -> device (current) */
+            cado_gpu_residency_active = 1;
+        }
+
         unsigned int sx = MIN(bw_end_copy, s + bw->checkpoint_precious);
         if (tcan_print) {
             /*
@@ -426,12 +450,23 @@ static void * mksol_prog(parallelizing_info_ptr pi, cxx_param_list & pl, void * 
 
                     for(unsigned int i = 0 ; i < Av_multiplex ; i++) {
                         arith_generic::elt * ff = fcoeffs[i * As_multiplex /* + j */];
+                        arith_generic::elt * ff_slice = As->vec_subvec(ff,
+                                    (s1 - s0 - 1 - k) * Av->simd_groupsize());
                         /* or maybe transpose here instead ?? */
+                        /* GPU residency: accumulate on the device-resident ymy[0]
+                         * (reading the device-resident vi[i]) instead of on host. */
+                        if (mksol_residency_ok && cado_gpu_residency_active) {
+                            size_t const u_buf = (size_t)(vi[i].i1 - vi[i].i0) * Av->vec_elt_stride(1);
+                            size_t const w_buf = (size_t)(ymy[0].i1 - ymy[0].i0) * As->vec_elt_stride(1);
+                            if (cado_gpu_addmul_tiny(ymy[0].v, vi[i].v, ff_slice,
+                                    (unsigned) eblock, Kc, Lc,
+                                    mmt_my_own_offset_in_items(ymy[0]), w_buf, u_buf))
+                                continue;
+                        }
                         AvxAs->addmul_tiny(
                                 mmt_my_own_subvec(ymy[0]),
                                 mmt_my_own_subvec(vi[i]),
-                                As->vec_subvec(ff,
-                                    (s1 - s0 - 1 - k) * Av->simd_groupsize()),
+                                ff_slice,
                                 eblock);
                     }
                     /* addmul_tiny degrades consistency ! */
@@ -471,6 +506,13 @@ static void * mksol_prog(parallelizing_info_ptr pi, cxx_param_list & pl, void * 
 
             // reached s + bw->interval. Count our time on cpu, and compute the sum.
             timing_disp_collective_oneline(pi, timing, s + sx - s0, tcan_print, "mksol");
+        }
+
+        /* Leave residency: materialise the device-resident accumulator so untwist
+         * and save (host) read correct data. */
+        if (mksol_residency_ok) {
+            cado_gpu_residency_active = 0;
+            if (cado_gpu_sync_to_host) cado_gpu_sync_to_host(ymy[0].v);
         }
 
         mmt_vec_untwist(mmt, ymy[0]);
