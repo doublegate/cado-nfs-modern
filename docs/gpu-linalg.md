@@ -102,6 +102,13 @@ gathers), and copies only the `src`/`dst` vectors per call.
 - **Bit-exact:** passes `bench_matcache`'s consistency check
   (`(M·v₁)·v₂ == (Mᵀ·v₂)·v₁`) — **all 4 checks pass** for both directions on the
   real 1M×1M matrix.
+- **End-to-end: validated in a real factorization.** A full
+  `cado-nfs.py … tasks.linalg.bwc.mm_impl=gpu` run (59-digit, `thr=2x2`) drives
+  the entire BWC pipeline (krylov → lingen → mksol → gather, balanced matrix,
+  multi-thread comm) through the GPU backend and returns the correct factors
+  (**product == N**) — confirmed by the `mm_impl=gpu` bwc command line and the
+  per-instance `matmul-gpu split` timing in the bwc logs. The backend is
+  production-usable, not just a bench.
 - **Measured (real backend, incl. per-call vector transfers):** BWC reuses the
   same host vector buffers every iteration, so the backend **page-locks (pins)
   each one the first time it sees it** — all subsequent H2D/D2H transfers then run

@@ -43,7 +43,11 @@ Work in progress — see the v3.1.0 roadmap. Landed so far:
   CADO's C++20 arith headers). Mirrors `matmul-basic`'s cache format and keeps
   **both M and Mᵀ resident on-device as CSR** so both BWC directions are fast
   gathers. **Passes `bench_matcache`'s `(M·v₁)·v₂ == (Mᵀ·v₂)·v₁` check — all 4,
-  both directions — on a real matrix**. The backend **pins each reused BWC host
+  both directions — on a real matrix — and **end-to-end in a real factorization**:
+  `cado-nfs.py … tasks.linalg.bwc.mm_impl=gpu` (59-digit, thr=2x2) drives the whole
+  BWC pipeline (krylov/lingen/mksol/gather, balanced matrix, multi-thread comm)
+  through the GPU backend and returns the correct factors (product == N). The
+  backend **pins each reused BWC host
   vector once** (page-locked memory), so all H2D/D2H transfers run at full PCIe
   speed: **6.76 Gnz/s** (up from 4.95 pageable) — **~11× a single `bucket`
   thread, ~3.75× the full-CPU `bucket`** (1.8 Gnz/s). The residual ~1 ms/iter is
