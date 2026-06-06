@@ -124,6 +124,20 @@ Work in progress — see the v3.1.0 roadmap. Landed so far:
   the device comm safely falls back to the host comm for `njobs>1` (residency is
   single-rank), so multi-rank runs stay correct. On a single GPU the device
   selection is a no-op; it round-robins across GPUs on multi-GPU hardware.
+- **mksol full vector residency — transfer-free accumulator.** Extends residency
+  from krylov to mksol, whose inner loop does a per-iteration host `addmul_tiny`
+  (`ymy[0].own += Σ vi[i].own × ff`, GF(2)) that otherwise forces the accumulator
+  back to the CPU each iteration. A bit-exact GPU `addmul_tiny`
+  (`bench/gpu-addmul-bench.cu`, validated standalone) runs it on the device, so
+  the accumulator stays device-resident across the whole block: mksol seeds the
+  constant-per-block `vi[i]` + zeroed accumulator on the device, runs the addmul
+  on the GPU (the matmul reuses the krylov residency path), and materialises
+  `ymy[0]` at block end for untwist/save. Works because mksol's `ymy[0]` is a
+  shared vector, so the standalone `mmt_vec_broadcast` is a no-op. `product == N`
+  18/18 across default, `DEVCOMM`, `VECRESIDENT+DEVCOMM` × `-t 4/8`;
+  compute-sanitizer clean; mksol's matmul runs fully transfer-free (H2D 100% +
+  D2H 100% skipped — even cleaner than krylov, the accumulator is never
+  invalidated mid-block). GF(2) only; falls back to the host addmul otherwise.
 
 ### UI/UX (Track 3.1) — run-status reporting
 
