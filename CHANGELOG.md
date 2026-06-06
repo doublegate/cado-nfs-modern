@@ -26,15 +26,17 @@ Work in progress — see the v3.1.0 roadmap. Landed so far:
   on the device (as BWC reuses it), on an RTX 3090 vs a 20-thread i9-10850K it
   reaches 6–15× the *naive* CPU SpMV (7.9 Gnz/s b64, 5.1 b128).
 - **Honest comparison vs the real `bucket` backend** (measured with
-  `bench_matcache` on a real 1M×1M, 30M-nnz matrix from `random_matrix`):
-  CADO's production `bucket`/`sliced` run ~0.63–0.67 Gnz/s single-thread (**~1.8×
-  the naive loop**), so the headline "6–15× vs naive" overstates the production
-  win. With the full bandwidth-bound CPU, the GPU kernel's **single-machine win is
-  a sober ~1.5–3×, not 6–15×** — both are memory-bandwidth-bound. The GPU's real
-  advantage is at *scale* (aggregate multi-GPU/multi-node bandwidth, out-of-core
-  matrices). Next: a `matmul_bNN_gpu` backend (resident matrix, coalesced kernel)
-  + multi-GPU via the existing MPI balancing. Full design + honest numbers:
-  `docs/gpu-linalg.md`.
+  `bench_matcache` on real `random_matrix` matrices). Single-thread on a 1M×1M
+  30M-nnz matrix: `basic` ~0.35 Gnz/s, `bucket`/`sliced` ~0.63–0.67 (~1.8× the
+  naive loop). A **full-CPU threaded scan** (one ~6M-nnz submatrix per thread)
+  shows `bucket` is **memory-bandwidth-bound — it saturates at ~1.8 Gnz/s** (only
+  ~2.1× the single thread across all 20 threads, flat by ~N=4). So vs the *full
+  production CPU*, the GPU b64 kernel (7.9 Gnz/s) is a **measured ~4.4×** — well
+  below the inflated "6–15× vs naive" but a real single-machine win, and a floor
+  (the kernel realizes only ~10% of GPU bandwidth). The GPU's largest advantage
+  remains at *scale* (aggregate multi-GPU/multi-node bandwidth, out-of-core
+  matrices). Next: a `matmul_bNN_gpu` backend + multi-GPU via the existing MPI
+  balancing. Full design + measured numbers: `docs/gpu-linalg.md`.
 
 ### UI/UX (Track 3.1) — run-status reporting
 

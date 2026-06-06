@@ -52,20 +52,30 @@ overstates the win. Measured directly with `bench_matcache` on a **real
 | `sliced` | ~1.5 | 0.67 | 1.9× |
 | **`bucket` (production default)** | ~1.58 | **0.63** | **1.8×** |
 
-So CADO's production `bucket` is **~1.8× the naive loop**, and the GPU b64 kernel
-(7.9 Gnz/s) is **~12× a single `bucket` thread**. But the full 20-core CPU runs
-`bucket` across all cores, and SpMV is **memory-bandwidth-bound** — the
-i9-10850K's ~45 GB/s won't scale 20×, realistically reaching a few Gnz/s. **So
-the honest single-machine win of this GPU kernel over the full production CPU is
-modest — roughly 1.5–3×, not 6–15× — because both are bandwidth-bound** (the 3090
-has ~20× the raw bandwidth, but the un-tuned kernel realizes only ~10% of it, and
-`bucket` is cache-blocked to *need* less bandwidth). A rigorous full-CPU `bucket`
-number needs a balanced multi-file split (`bench_matcache` threads over one
-submatrix file per thread) — that exact measurement is the immediate next step.
+So CADO's production `bucket` is ~1.8× the naive loop single-threaded. And it
+**barely scales with cores**, because SpMV is memory-bandwidth-bound — measured
+with `bench_matcache --nthreads N` (one ~6M-nnz submatrix per thread) on the
+i9-10850K (10C/20T):
 
-**Where the GPU genuinely wins is at *scale*:** aggregate bandwidth across many
-GPUs/nodes, and matrices too large for one machine's RAM — the multi-GPU/MPI path
-below — not a single-desktop 10× on the matmul kernel.
+| threads | aggregate Gnz/s | vs 1 thread |
+|---:|---:|---:|
+| 1 | 0.85 | 1.0× |
+| 2 | 1.26 | 1.5× |
+| 4 | 1.51 | 1.8× |
+| 8 | 1.59 | 1.9× |
+| 16 | 1.81 | 2.1× |
+| **20** | **1.81** | **2.1×** |
+
+**Full-CPU `bucket` saturates at ~1.8 Gnz/s** (only ~2.1× the single thread —
+bandwidth-bound by ~N=4). Against that, the GPU b64 kernel at **7.9 Gnz/s is a
+measured ~4.4× the full production CPU** — a real single-machine win, well below
+the inflated "6–15× vs naive" but solidly above bandwidth parity. And it is a
+*floor*: the un-tuned kernel realizes only ~10% of the 3090's ~936 GB/s, so a
+coalesced kernel should widen the gap.
+
+**The GPU's biggest advantage is still at *scale*:** aggregate bandwidth across
+many GPUs/nodes and matrices too large for one machine's RAM (the multi-GPU/MPI
+path below) — but even on one desktop the kernel is ~4× the tuned CPU backend.
 
 ## Other caveats
 
@@ -99,10 +109,10 @@ below — not a single-desktop 10× on the matmul kernel.
 
 - **Done & validated:** the GF(2) SpMV GPU kernel (b64/b128/b256), bit-exact vs
   the CPU reference (`bench/gpu-spmv-bench.cu`); and the honest comparison vs
-  CADO's real `basic`/`sliced`/`bucket` backends on a real matrix
-  (`bench_matcache`), which puts the single-machine win at a sober ~1.5–3× (not
-  6–15×) — both bandwidth-bound.
-- **Next:** a full-CPU threaded `bucket` measurement (balanced split); then the
-  `matmul_bNN_gpu` backend (resident matrix, ELL/coalesced kernel) + the
-  multi-GPU/MPI wiring, where the GPU's real advantage (aggregate bandwidth at
-  scale, out-of-core matrices) lives.
+  CADO's real `bucket` backend on a real matrix (`bench_matcache`), **including a
+  measured full-CPU threaded scan** — `bucket` saturates at ~1.8 Gnz/s (20
+  threads, bandwidth-bound), so the GPU's **measured single-machine win is ~4.4×**
+  (a floor; the kernel is un-tuned).
+- **Next:** the `matmul_bNN_gpu` backend (resident matrix, coalesced/ELL kernel)
+  + multi-GPU/MPI wiring, where the GPU's largest advantage (aggregate bandwidth
+  at scale, out-of-core matrices) lives.
