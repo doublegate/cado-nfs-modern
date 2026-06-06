@@ -208,3 +208,58 @@ backend; the remaining work is integration + refinement.
   already finds every valid relation, so the GPU is added cost without added
   yield. The GPU ECM engine itself (64/128-bit, bit-exact) is correct and the
   hook is correct; the offload simply does not pay off here.
+
+## Scale-out and batch product-tree (Track 2.3/2.4 — design)
+
+Two further GPU directions from the v3.1.0 roadmap. Like the multi-node residency
+split (`docs/gpu-linalg.md`), they are documented as concrete designs rather than
+shipped code, because validating them needs hardware/regimes this box (one RTX
+3090, factoring not DLP) does not have. What *is* done and validatable ships; the
+rest is specified so it drops in when the hardware/regime is available.
+
+### Multi-GPU / cluster cofactor scale-out + DLP (Track 2.3)
+
+- **The scale-out mechanism already exists and is validated at N=1 GPU.** The
+  GPU pre-factoring front-end (`misc/gpu_prefactor`, `docs/gpu-prefactor.md`)
+  already splits its curve batch across all visible devices via
+  `cudaGetDeviceCount()` + round-robin `cudaSetDevice()` + per-device async
+  launches; on one GPU that degenerates to a single launch (validated,
+  `product == N`). The same pattern generalises the in-sieve `gpu_ecm.cu`
+  survivor batch.
+- **What remains is HW/regime-gated, not algorithmic.** (1) Distributing the
+  survivor batch across *several* local GPUs needs ≥2 GPUs to validate the
+  cross-device split and to measure any win. (2) MPI-awareness (each node uses its
+  own GPUs) composes with the existing one-rank-per-GPU model (`gpu_select_device`)
+  but needs a cluster to validate. (3) **DLP is the regime where this could pay
+  off**: cofactorization is a larger fraction of DLP than of the Amdahl-bound
+  factoring siever (`docs/gpu-cofactorization.md`'s honest negative is a
+  *factoring* result), but exercising it needs a DLP set-up (`-dlp`, a GF(p)
+  target) and its own relation-validation. The device selection would extend the
+  `CADO_GPU_*` env with explicit per-rank device lists.
+- **Honest expectation:** limited single-machine *factoring* value (the Amdahl
+  wall stands); real for DLP and for clusters with many GPUs.
+
+### GPU batch product-tree smoothness (Track 2.4)
+
+- **Idea.** Replace per-cofactor ECM with a Bernstein-style **batch smoothness
+  test**: build a product tree of a batch of survivor cofactors, a remainder tree
+  against the product of the factor-base primes (or prime powers), and read off
+  smooth cofactors. On the GPU the tree levels are wide, regular multiplications —
+  a good fit, and potentially a win in heavy-`mfb` regimes where per-cofactor ECM
+  is expensive and many survivors are smooth.
+- **Why it is design-only here.** It is a *new algorithm*, not a port: it must
+  produce a **bit-exact relation set** vs the CPU `facul` path (the same gate the
+  in-sieve GPU ECM had to pass — and where a subtle `> 2^lpb` bug once produced a
+  100%-invalid "superset"; see above). That validation harness, plus the
+  big-integer product/remainder-tree GPU kernels (multi-precision, like the
+  IFMA/montmul work), is a substantial build, and the payoff is regime-dependent
+  (heavy `mfb` only). Flag-gated (`CADO_GPU_COFAC=producttree`), it would reuse
+  the multi-precision device arithmetic validated in `bench/gpu-ecm-mp.cu` and
+  `bench/ifma-modmul.c`.
+
+### What shipped instead (validatable now)
+
+The one Track 1.4/2.x piece that is fully validatable on this box — the AVX-512
+**IFMA GF(p) Montgomery modmul kernel** (`bench/ifma-modmul.c`, bit-exact vs GMP
+under SDE, 0/32000) — is implemented and CI-gated, as the arithmetic foundation a
+GF(p) DLP backend (and a product-tree's modular reductions) would build on.

@@ -235,6 +235,15 @@ Work in progress — see the v3.1.0 roadmap. Landed so far:
   fallback if SDE is unavailable). Full mpfq integration (wiring it into the
   generated GF(p) arithmetic + the BWC GF(p) SpMV, and a perf number on real
   IFMA silicon) is follow-up; this proves the arithmetic primitive.
+- **Cofactor scale-out + GPU product-tree — design documented** (Tracks 2.3/2.4,
+  `docs/gpu-cofactorization.md`). The multi-GPU curve-batching *mechanism* already
+  exists and is validated at N=1 (`misc/gpu_prefactor` splits across
+  `cudaGetDeviceCount()` devices); what remains — distributing across ≥2 GPUs,
+  MPI-awareness, and DLP tuning — is HW/regime-gated, not algorithmic, so it is
+  specified rather than shipped. GPU batch product-tree smoothness (Bernstein
+  remainder tree, flag-gated) is a new algorithm requiring a bit-exact
+  relation-set harness; designed to reuse the validated multi-precision device
+  arithmetic (`bench/gpu-ecm-mp.cu`, `bench/ifma-modmul.c`).
 
 ### CPU (Track 1.2) — PGO retry (honest negative)
 
