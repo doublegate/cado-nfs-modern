@@ -98,6 +98,9 @@ struct matmul_gpu : public matmul_interface {
      * staged pageable path. (Full device residency -- vectors never leaving the
      * GPU -- would need changes in the mmt_vec layer above; this is the safe,
      * contained win at the backend level.) */
+    /* split-timing accumulators (ms), used when CADO_GPU_TIMING is set */
+    double t_h2d = 0, t_ker = 0, t_d2h = 0; long t_n = 0;
+
     std::map<const void *, size_t> pinned;
     void ensure_pinned(const void * p, size_t bytes) {
         auto it = pinned.find(p);
@@ -216,10 +219,33 @@ void matmul_gpu<Arith>::mul(void * xdst, void const * xsrc, int d)
 
     ensure_pinned(xsrc, srcbytes);
     ensure_pinned(xdst, dstbytes);
-    CUCHECK(cudaMemcpy(d_src, xsrc, srcbytes, cudaMemcpyHostToDevice));
-    launch_spmv(K, d_rp[dir], d_col[dir], d_src, d_dst, nrows);
-    CUCHECK(cudaGetLastError());
-    CUCHECK(cudaMemcpy(xdst, d_dst, dstbytes, cudaMemcpyDeviceToHost));
+
+    /* optional split-timing (CADO_GPU_TIMING=1): transfer vs kernel, to decide
+     * whether the backend is transfer- or kernel-bound after pinning. */
+    static const bool timing = getenv("CADO_GPU_TIMING") != nullptr;
+    if (!timing) {
+        CUCHECK(cudaMemcpy(d_src, xsrc, srcbytes, cudaMemcpyHostToDevice));
+        launch_spmv(K, d_rp[dir], d_col[dir], d_src, d_dst, nrows);
+        CUCHECK(cudaGetLastError());
+        CUCHECK(cudaMemcpy(xdst, d_dst, dstbytes, cudaMemcpyDeviceToHost));
+    } else {
+        cudaEvent_t e0, e1, e2, e3;
+        cudaEventCreate(&e0); cudaEventCreate(&e1); cudaEventCreate(&e2); cudaEventCreate(&e3);
+        cudaEventRecord(e0);
+        CUCHECK(cudaMemcpy(d_src, xsrc, srcbytes, cudaMemcpyHostToDevice));
+        cudaEventRecord(e1);
+        launch_spmv(K, d_rp[dir], d_col[dir], d_src, d_dst, nrows);
+        cudaEventRecord(e2);
+        CUCHECK(cudaMemcpy(xdst, d_dst, dstbytes, cudaMemcpyDeviceToHost));
+        cudaEventRecord(e3);
+        cudaEventSynchronize(e3);
+        float h2d, ker, d2h;
+        cudaEventElapsedTime(&h2d, e0, e1);
+        cudaEventElapsedTime(&ker, e1, e2);
+        cudaEventElapsedTime(&d2h, e2, e3);
+        t_h2d += h2d; t_ker += ker; t_d2h += d2h; t_n++;
+        cudaEventDestroy(e0); cudaEventDestroy(e1); cudaEventDestroy(e2); cudaEventDestroy(e3);
+    }
 
     iteration[d]++;
 }
@@ -227,6 +253,12 @@ void matmul_gpu<Arith>::mul(void * xdst, void const * xsrc, int d)
 template<typename Arith>
 matmul_gpu<Arith>::~matmul_gpu()
 {
+    if (t_n) {
+        fprintf(stderr, "# matmul-gpu split over %ld SpMV: H2D %.3f ms, kernel "
+                "%.3f ms, D2H %.3f ms (per call); transfers %.0f%%\n",
+                t_n, t_h2d / t_n, t_ker / t_n, t_d2h / t_n,
+                100.0 * (t_h2d + t_d2h) / (t_h2d + t_ker + t_d2h));
+    }
     for (int i = 0; i < 2; i++) { if (d_rp[i]) cudaFree(d_rp[i]); if (d_col[i]) cudaFree(d_col[i]); }
     if (d_src) cudaFree(d_src);
     if (d_dst) cudaFree(d_dst);

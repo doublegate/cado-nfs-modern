@@ -112,15 +112,56 @@ gathers), and copies only the `src`/`dst` vectors per call.
   leaving the GPU, exchanged only across MPI — an `mmt_vec`-layer change above the
   backend) removes it, toward the ~7.9 Gnz/s kernel-only ceiling.
 
-## Next increments
+## Where the time goes (measured), and the residency decision
 
-1. **Pinned host transfers — done.** The backend pins each reused BWC vector once,
-   so transfers run at full PCIe speed (4.95 → 6.76 Gnz/s). The remaining win
-   needs **full vector residency** (hold the `mmt_vec` data on the GPU across all
-   iterations, copy out only for the MPI exchange) — an `mmt_vec`-layer change
-   above the backend, removing the last ~1 ms/iter.
-2. **Kernel tuning**: coalesced/ELL layout, column sorting, shared-memory `src`
-   caching (the kernel realizes only ~10% of peak bandwidth today).
+Split-timed in the backend (`CADO_GPU_TIMING=1`, pinned, b64, 30M nnz, RTX 3090):
+
+| segment | per-SpMV | share |
+|---|---:|---:|
+| H2D `src` | 1.81 ms | 36% |
+| **kernel** | 2.63 ms | 52% |
+| D2H `dst` | 0.64 ms | 12% |
+| — transfers total | 2.45 ms | **48%** |
+
+So even after pinning, **~half the time is the per-call `src`/`dst` transfers** —
+full vector residency is a genuine **~2× opportunity** (~13 Gnz/s → ~7× the full
+CPU). The catch is *what* it takes, established by reading the BWC vector layer:
+
+- **Every SpMV is bracketed by host-memory work that can't be skipped at the
+  backend level.** After each `matmul_top_mul_cpu` (the `mm->mul` seam,
+  `matmul_top.cpp:762`) comes `mmt_vec_allreduce` / `matmul_top_mul_comm`
+  (`matmul_top_comm.cpp`), whose reduce/broadcast call `MPI_Allreduce` /
+  `MPI_Reduce_scatter_block` / `MPI_Allgather` **directly on `vec->v` host
+  memory** and do thread-local `vec_add_and_reduce`/`vec_set` on host. And every
+  inner iteration of `krylov.cpp` calls `x_dotprod(... ymy[0] ...)` which **reads
+  the vector on the host** before the SpMV.
+- Therefore a device-resident vector must, every iteration, be on the host for
+  the dot-product and for the comm — so **transfers can only be removed by moving
+  the dot-product, the thread reduction, the broadcast, and (for >1 node) the MPI
+  exchange onto the GPU too.** That is a port of BWC's vector layer, not a backend
+  tweak, and any missed sync silently corrupts the result.
+
+**Decision:** this is worth ~2× but is a deliberate multi-step project, not a safe
+single increment. The honest sequence:
+
+1. **A device-resident `mmt_vec` shadow** + `matmul_interface` sync hooks
+   (`to_device`/`from_device`), backend keeps the authoritative device copy.
+2. **GPU `x_dotprod`** (sparse `x` · device vector) so the per-iteration dot
+   product no longer pulls the vector to the host.
+3. **GPU intra-node reduction/broadcast** for the single-node multi-thread comm
+   (the common single-machine case), keeping vectors on-device across the inner
+   loop; sync to host only per-interval (twist/save) and for real MPI.
+4. **Multi-node**: GPU-direct (CUDA-aware) MPI, or host-staged exchange.
+
+Each step is correctness-gated by a full verified factorization. Until then, the
+backend captures the bounded win (pinning) and is bit-exact.
+
+## Kernel tuning (the other ~52%)
+
+Independent of residency: the one-thread-per-row kernel realizes only ~10% of the
+3090's bandwidth (uncoalesced `src[col]` gather). Coalesced/ELL layout, column
+sorting for reuse, and shared-memory `src` caching are safe, contained wins that
+attack the 52% kernel share directly.
 3. **Multi-GPU / multi-node**: BWC already splits the matrix across an `nh×nv`
    MPI grid (`balancing_workhorse`), each rank owning a submatrix; the GPU backend
    slots in at each rank's local `mm->mul()`. One GPU per rank → multi-GPU on a
