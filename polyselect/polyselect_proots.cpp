@@ -17,6 +17,7 @@
 #include "polyselect_thread_team.hpp"
 #include "gcd.h"
 #include "roots_mod.hpp"
+#include "polyselect-gpu-hooks.h"
 
 /* init polyselect_proots_t */
 void
@@ -195,10 +196,62 @@ void polyselect_proots_compute_subtask(polyselect_thread_ptr thread)/*{{{*/
     fprintf(stderr, "thread %d (%d-th in sync group) enters proots with %d threads [%lu .. %lu)\n", thread->thread_index, it, nt, i0, i1);
 #endif
 
-    uint64_t * rp = (uint64_t *) malloc(thread->team->header->d * sizeof(uint64_t));
+    const int d = thread->team->header->d;
+    uint64_t * rp = (uint64_t *) malloc(d * sizeof(uint64_t));
     FATAL_ERROR_CHECK(!rp, "cannot allocate memory");
 
-    for (unsigned long i = i0; i < i1; i++) {
+    /* GPU root-finding path (v3.2.0-modern, Track C2): compute this thread's whole
+     * prime range [i0,i1) in one device launch, solving x^d == (Ntilde mod p_i)
+     * (mod p_i) for every prime at once -- the per-prime root step that dominates
+     * stage-1. Gated on CADO_GPU_POLYSELECT *and* a GPU backend having installed
+     * the hook (polyselect-gpu.cu under -DENABLE_GPU=ON); otherwise the per-prime
+     * CPU loop below runs unchanged. The returned root SET matches
+     * roots_mod_uint64, so roots_lift + polyselect_proots_add are identical; the
+     * device call returns 0 (fall back to CPU) on any allocation/launch failure. */
+    int gpu_done = 0;
+    if (cado_gpu_polyselect_roots != NULL && getenv("CADO_GPU_POLYSELECT") != NULL
+        && i1 > i0) {
+        unsigned int nb = (unsigned int) (i1 - i0);
+        uint64_t * abuf = (uint64_t *) malloc((size_t) nb * sizeof(uint64_t));
+        uint32_t * pbuf = (uint32_t *) malloc((size_t) nb * sizeof(uint32_t));
+        uint64_t * rootbuf = (uint64_t *) malloc((size_t) nb * d * sizeof(uint64_t));
+        unsigned int * nrbuf = (unsigned int *) malloc((size_t) nb * sizeof(unsigned int));
+        if (abuf && pbuf && rootbuf && nrbuf) {
+            for (unsigned long i = i0; i < i1; i++) {
+                unsigned long p = pt->Primes[i];
+                unsigned int j = (unsigned int) (i - i0);
+                if (polyselect_poly_header_skip(thread->team->header, p)) {
+                    pbuf[j] = 0;            /* p==0 marks a skipped prime */
+                    abuf[j] = 0;
+                } else {
+                    pbuf[j] = (uint32_t) p;
+                    abuf[j] = mpz_fdiv_ui(thread->team->header->Ntilde, p);
+                }
+            }
+            if (cado_gpu_polyselect_roots(abuf, pbuf, nb, d, rootbuf, nrbuf)) {
+                for (unsigned long i = i0; i < i1; i++) {
+                    unsigned long p = pt->Primes[i];
+                    unsigned int j = (unsigned int) (i - i0);
+                    if (pbuf[j] == 0) {     /* skipped prime: keep index, nr=0 */
+                        thread->team->R->nr[i] = 0;
+                        continue;
+                    }
+                    unsigned long nrp = nrbuf[j];
+                    for (unsigned long t = 0; t < nrp; t++)
+                        rp[t] = rootbuf[(size_t) j * d + t];
+                    tot_roots += nrp;
+                    nrp = roots_lift(rp,
+                            thread->team->header->Ntilde, d,
+                            thread->team->header->m0, p, nrp);
+                    polyselect_proots_add(thread->team->R, nrp, rp, i);
+                }
+                gpu_done = 1;
+            }
+        }
+        free(abuf); free(pbuf); free(rootbuf); free(nrbuf);
+    }
+
+    for (unsigned long i = i0; !gpu_done && i < i1; i++) {
         unsigned long p = pt->Primes[i];
 
         /* add fake roots to keep indices */

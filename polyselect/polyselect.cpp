@@ -61,6 +61,7 @@
 #include "getprime.h"
 #include "dllist.h"
 #include "auxiliary.hpp"
+#include "polyselect-gpu-hooks.h"
 
 static pthread_mutex_t iolock = PTHREAD_MUTEX_INITIALIZER;
 
@@ -670,6 +671,13 @@ int main(int argc, char const * argv[])
 
   polyselect_main_data main_data;
   polyselect_main_data_init_defaults(main_data);
+
+  /* Install the GPU root-finding backend if requested (v3.2.0-modern, Track C2).
+   * A no-op in CPU-only builds; in a -DENABLE_GPU=ON build it installs the device
+   * batch root-finder, which polyselect_proots then uses when CADO_GPU_POLYSELECT
+   * is set. Left here (before any work) so the hook is ready for the first task. */
+  if (getenv("CADO_GPU_POLYSELECT") != NULL)
+      cado_gpu_polyselect_init();
 
   cxx_param_list pl;
 

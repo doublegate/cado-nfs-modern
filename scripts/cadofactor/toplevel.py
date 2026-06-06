@@ -1480,6 +1480,15 @@ class Cado_NFS_toplevel(object):
         parser.add_argument("--gpu-curves", type=int, default=4096,
                             help="GPU ECM curves for --gpu-prefactor")
         parser.add_argument(
+            "--gpu-polyselect",
+            help="EXPERIMENTAL: run polynomial-selection root-finding on the "
+                 "GPU (needs a -DENABLE_GPU=ON build). Produces a bit-identical "
+                 "polynomial set, but is currently a net slowdown at these sizes "
+                 "(root-finding is a minority of stage-1 and CADO's CPU d-th-root "
+                 "is already fast); kept for research / larger-N work. See "
+                 "docs/gpu-polyselect.md.",
+            action='store_true')
+        parser.add_argument(
             "--dlp-no-keep", "-dlp-no-keep",
             help="Disable the feature that CADO_DEBUG"
                  " is set by default in dlp mode",

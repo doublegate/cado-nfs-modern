@@ -75,7 +75,73 @@ near 10⁹ — so the GPU kernel's root set matches `roots_mod_uint64` across th
 prime range. (CADO uses a specialised d-th-root algorithm; the gcd kernel returns
 the same *set*, which is what the collision search consumes.)
 
-## Integration into the collision search (design)
+## Live integration — DONE (and the honest performance verdict)
+
+The full live `--gpu-polyselect` wiring is implemented, validated, and **shipped
+behind a default-off flag** — together with an honest measurement that it is a
+**net slowdown at the sizes testable on this hardware**, for reasons that are
+fundamental rather than implementation bugs. The capability is real and correct;
+the speedup is not there yet. Both facts are recorded here.
+
+**What was built (all committed):**
+
+- `polyselect/polyselect-gpu.cu` — the device backend. The validated gcd + Cantor–
+  Zassenhaus `roots_gcd` (host/device-identical) ported verbatim from the bench;
+  one thread per prime builds `f = x^d − a_i` and solves it mod `p_i`. The host
+  entry batches a thread's whole prime range into **one launch** using
+  **persistent per-thread device + pinned-host buffers** (allocated once, grown on
+  demand, never freed) so the thousands of small per-ad-value calls do not pay
+  `cudaMalloc`/`cudaFree` latency every time.
+- `polyselect/polyselect-gpu-hooks.{h,cpp}` + `polyselect-gpu-stub.cpp` — the hook
+  ABI. The function pointer `cado_gpu_polyselect_roots` is defined in
+  `polyselect_common` (the dependency-free leaf), so the CUDA-free
+  `polyselect_proots.cpp` calls through it with no circular static-link dependency
+  (the `matmul-gpu-hooks` lesson). `cado_gpu_polyselect_init()` is defined in the
+  `.cu` (GPU build, installs the pointer) **or** the stub (CPU build, no-op) —
+  exactly one is linked, so there is no duplicate symbol.
+- `polyselect/polyselect_proots.cpp` — the injection. Gated on `CADO_GPU_POLYSELECT`
+  **and** a non-null hook: gather `(p_i, a_i = Ñ mod p_i)` for the thread's
+  `[i0,i1)` range, one device call, then per-prime `roots_lift` +
+  `polyselect_proots_add` (byte-identical downstream). Returns to the per-prime CPU
+  loop on any failure; the CPU loop is otherwise completely unchanged.
+- `cado-nfs.py --gpu-polyselect` (`toplevel.py`) — sets `CADO_GPU_POLYSELECT=1` so
+  every spawned `polyselect` worker uses the device path; documented as
+  experimental.
+
+**Correctness gate — passed.** The GPU path produces a **bit-identical polynomial
+set** to the CPU path: direct `polyselect` head-to-head, sorted poly lines, 0 diff
+at three scales (198, 136, and 7 kept polynomials; `d=4` and `d=5`, `P` up to
+250000). Device-absent → clean `"no CUDA device; using CPU root-finding"` fallback.
+**End-to-end `product == N`**: the 59-digit smoke factors correctly with
+`--gpu-polyselect` (and with `CADO_GPU_POLYSELECT=1` propagated to subprocesses),
+`260938498861057 · 588120598053661 · 760926063870977 · 773951836515617 == N`.
+
+**Performance gate — honest negative.** Measured on the i9-10850K + RTX 3090
+(`d=5`, `P=50000`, `admax=60000`, `-t 4`): **CPU 3.2 s vs GPU 4.1 s** — a net
+slowdown (persistent buffers already cut it from 4.7 s; per-call `cudaMalloc` churn
+was the first culprit). Two fundamental reasons, neither fixable inside the
+root-finding offload:
+
+1. **Amdahl.** Root-finding is ~30–40 % of stage-1; the collision search and size
+   optimization (the majority) stay on the CPU. Even *free* root-finding caps the
+   whole-stage speedup at ~1.5×.
+2. **The CPU baseline is already fast.** CADO's `roots_mod_uint64` is a
+   *specialised d-th-root* algorithm; it finds every small prime's roots for the
+   whole table in well under the 0.01 s the phase reports. There is essentially no
+   compute to amortise a PCIe round-trip + kernel-launch + sync against — so per
+   ad-value the device path loses on latency, exactly the small-batch GPU
+   anti-pattern.
+
+This mirrors the **GPU-cofactorization** finding (3.0.0: correct, validated, but
+Amdahl-bound → no net single-machine win). The honest conclusion: **offloading
+root-finding alone does not speed up polyselect at these sizes.** The msieve-style
+win comes from offloading the **collision search** (the memory-bound hash/match
+bulk of stage-1) at much larger `N` — which this validated root-finder and hook ABI
+are the foundation for, and which is the documented next step (below). The flag and
+`.cu` ship so that work, and larger-`N` / multi-GPU experiments, start from a
+correct, integrated base rather than a prototype.
+
+## Integration into the collision search (original design notes)
 
 With the root set validated, the wiring is well-defined. The per-prime CPU loop in
 `polyselect_proots_compute_subtask` (`polyselect/polyselect_proots.cpp`) is:
@@ -104,13 +170,12 @@ and the collision search (`polyselect.cpp` / `polyselect_shash`) consumes
    same; the gate is **matching Murphy-E of the selected polynomial + an
    end-to-end `product == N`** factorization using the GPU-selected polynomial.
 
-**Honest scope (remaining).** The full live wiring is a large, careful change to a
-performance-critical, multithreaded subsystem: the proots subtask is split across
-the thread team (the GPU version has one thread issue the batched launch while the
-team coordinates), the CUDA build must be added to `polyselect/` (today pure C++),
-and the end-to-end Murphy-E / `product == N` gate must pass. The kernels and the
-exact target are validated here; the live integration is the next step, taken
-incrementally so each piece stays gated.
+**Status update.** This design was fully implemented and validated — see "Live
+integration — DONE" above. Each thread issues its own batched launch over its prime
+sub-range (no thread-team restructure needed), the CUDA build was added to
+`polyselect/` behind `HAVE_GPU_ECM`, and the bit-identical-poly-set +
+`product == N` gates pass. The remaining open item is the **performance** win,
+which root-finding offload alone does not deliver (the honest negative above).
 
 ## Plan — the GPU polyselect path
 

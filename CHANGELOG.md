@@ -98,6 +98,42 @@ validated-at-degenerate-path code + design.
   flag, gated on matching polynomial quality (Murphy-E) + an end-to-end
   `product == N`. The full module lands incrementally; this is the foundation.
 
+### GPU (C2) — live `--gpu-polyselect` wiring (DONE; correct, gated, honest negative)
+
+- **Full live integration shipped behind a default-off flag.** The validated
+  gcd + Cantor–Zassenhaus root-finder is now wired into CADO's real polyselect:
+  - `polyselect/polyselect-gpu.cu` — device backend; one thread per prime builds
+    `f = x^d − a_i` and solves it mod `p_i`, the host entry batches a thread's
+    whole prime range into **one launch** with **persistent per-thread device +
+    pinned-host buffers** (no per-ad-value `cudaMalloc` churn).
+  - `polyselect/polyselect-gpu-hooks.{h,cpp}` + `polyselect-gpu-stub.cpp` — the
+    hook ABI (the `matmul-gpu-hooks` pattern): the `cado_gpu_polyselect_roots`
+    pointer lives in `polyselect_common` (dependency-free leaf, no circular
+    static-link), `cado_gpu_polyselect_init()` is defined in the `.cu` (GPU build)
+    *or* the stub (CPU build) — exactly one is linked.
+  - `polyselect/polyselect_proots.cpp` — the injection, gated on
+    `CADO_GPU_POLYSELECT` + a non-null hook; gathers `(p_i, Ñ mod p_i)` for the
+    thread's range, one device call, then per-prime `roots_lift` +
+    `polyselect_proots_add` (byte-identical downstream). Falls back to the
+    unchanged per-prime CPU loop on any failure / non-GPU build.
+  - `cado-nfs.py --gpu-polyselect` (`toplevel.py`) — sets `CADO_GPU_POLYSELECT=1`
+    for every spawned polyselect worker; documented as experimental.
+- **Correctness gate — passed.** GPU vs CPU produce a **bit-identical polynomial
+  set** (sorted-poly-line diff = 0) at three scales (198 / 136 / 7 kept polys;
+  `d=4,5`, `P` up to 250000); device-absent → clean CPU fallback; the 32 ctest
+  `polyselect` tests pass; **end-to-end `product == N`** on the 59-digit smoke with
+  `--gpu-polyselect`.
+- **Performance gate — honest negative.** Measured (i9-10850K + RTX 3090, `d=5`
+  `P=50000` `admax=60000` `-t 4`): **CPU 3.2 s vs GPU 4.1 s** — a net slowdown.
+  Two fundamental causes, not bugs: (1) **Amdahl** — root-finding is a minority of
+  stage-1 (collision search + size-opt stay on CPU), capping the best case at
+  ~1.5×; (2) CADO's CPU `roots_mod_uint64` is a *specialised d-th-root* algorithm,
+  already so fast that there is no compute to amortise the kernel-launch + PCIe
+  round-trip against. Mirrors the 3.0.0 GPU-cofactorization Amdahl finding. The
+  win requires offloading the **collision search** (the bulk of stage-1) at much
+  larger `N` — the documented next step, for which this validated root-finder and
+  hook ABI are the foundation. Full analysis in `docs/gpu-polyselect.md`.
+
 Post-`3.1.0-modern` housekeeping carried in this cycle (no code/behaviour change):
 
 - **Project renamed to `cado-nfs-modern`.** Both the local checkout and the

@@ -10,8 +10,24 @@ add_library(polyselect_common
     size_optimization.cpp
     polyselect_alpha.cpp
     polyselect_norms.cpp
+    polyselect-gpu-hooks.cpp
     )
 target_link_libraries (polyselect_common utils)
+
+# GPU polynomial-selection root-finding backend (v3.2.0-modern, Track C2). Built
+# only with the CUDA backend enabled (-DENABLE_GPU=ON, which sets HAVE_GPU_ECM and
+# enables the CUDA language in config/cuda.cmake); otherwise a no-op stub leaves
+# the hook null so the per-prime CPU path runs. Exactly one of the two is linked
+# into the polyselect binary, so cado_gpu_polyselect_init has a single definition.
+if(HAVE_GPU_ECM)
+    if(NOT DEFINED CADO_GPU_ARCH)
+        set(CADO_GPU_ARCH 86)
+    endif()
+    set(polyselect_gpu_sources polyselect-gpu.cu)
+    set_source_files_properties(polyselect-gpu.cu PROPERTIES LANGUAGE CUDA)
+else()
+    set(polyselect_gpu_sources polyselect-gpu-stub.cpp)
+endif()
 
 # It _seems_ that several polyselect-like libraries share the same
 # general working principle, and that these objects can be treated as a
@@ -40,10 +56,17 @@ mark_targets_as_openmp(polyselect_middle)
 
 add_executable (polyselect
     polyselect.cpp
+    ${polyselect_gpu_sources}
     $<TARGET_OBJECTS:polyselect_middle>
     )
 target_link_libraries (polyselect polyselect_common ${pthread_libs})
 mark_targets_as_openmp(polyselect)
+if(HAVE_GPU_ECM)
+    set_target_properties(polyselect PROPERTIES
+        CUDA_ARCHITECTURES "${CADO_GPU_ARCH}" CUDA_STANDARD 20)
+    target_compile_options(polyselect PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-O3>)
+    target_link_libraries(polyselect CUDA::cudart)
+endif()
 
 add_executable (polyselect_ropt
     ropt_main.cpp

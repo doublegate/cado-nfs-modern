@@ -255,6 +255,18 @@ if __name__ == '__main__':
                 toplevel_params.purge_temp_files(nopurge=not _subfac)
                 sys.exit(0 if _subfac else 1)
 
+    # GPU polynomial-selection root-finding (Track C2, EXPERIMENTAL). Setting the
+    # env makes every spawned polyselect worker install the device root-finder
+    # (polyselect-gpu.cu, a -DENABLE_GPU=ON build); without that build the binary
+    # falls back to the CPU path automatically. Honest note: this is a net slowdown
+    # at currently-testable sizes (root-finding is a minority of stage-1 and CADO's
+    # CPU d-th-root is fast); the polynomial set is bit-identical. See
+    # docs/gpu-polyselect.md.
+    if getattr(toplevel_params.args, "gpu_polyselect", False):
+        os.environ["CADO_GPU_POLYSELECT"] = "1"
+        logger.info("--gpu-polyselect: enabling GPU root-finding in polyselect "
+                    "(experimental; see docs/gpu-polyselect.md)")
+
     factorjob = cadotask.CompleteFactorization(db=db,
                                                parameters=parameters,
                                                path_prefix=[])
