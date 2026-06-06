@@ -239,8 +239,24 @@ surgical edit:
   reduce-scatter "pack at the beginning" repack), **not** `mmt_vec_allreduce`.
   `allreduce` is hit only by the twist and the prep/secure rank checks. So the
   validated hook proves the device-comm *mechanism* end-to-end, but the
-  transfer-saving port must target `reduce`+`broadcast` (harder: it repacks and
-  flips side `d`).
+  transfer-saving port must target `reduce`+`broadcast`.
+- **Why `reduce`+`broadcast` is fundamentally harder than `allreduce`: it is a 2D
+  transpose, not a 1D reduction.** `mmt_vec_allreduce` reduces a vector across the
+  siblings of **one** communicator (`wr[v.d]`) and every sibling ends equal — a 1D
+  XOR-reduce, which the validated device hook implements directly (and which works
+  on the 2×2 grid: `-t 4` passes). `matmul_top_mul_comm`, by contrast,
+  **reduce-scatters along `w`'s direction `wr[w.d]` and all-gathers along the
+  *perpendicular* direction `wr[v.d]`** (`mmt_vec_reduce_inner` packs into
+  `sibling(0)`; `mmt_vec_broadcast` does the `MPI_Allgather` over `xwrpals` in the
+  other axis). That couples *all* grid threads' data in a transpose-like
+  reorganization — the "shuffled product" the code comments warn is "not the
+  identity". A device port therefore cannot be a per-communicator reduce; it must
+  reproduce the 2D reduce-scatter → repack (with `mmt_my_own_offset_in_items`'s
+  per-`(jrank,trank)` offsets) → all-gather, bit-exactly. The device compute
+  kernels (reduce/broadcast) are in hand and validated; the remaining work is this
+  2D layout/permutation logic on the device buffers — a focused, intricate effort
+  (and the hot path, so a subtle offset bug = silent wrong factorization: it must
+  be built incrementally with the no-trust→trust `product == N` gate).
 - **The win is gated on invalidation/sync coverage that today only covers the
   krylov main loop.** Marking comm'd device buffers `current` (device
   authoritative) corrupted **prep/secure** (the rank check looped forever),
