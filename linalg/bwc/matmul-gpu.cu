@@ -511,6 +511,29 @@ struct matmul_gpu : public matmul_interface {
     uint32_t * d_rp[2] = { nullptr, nullptr };
     uint32_t * d_col[2] = { nullptr, nullptr };
     unsigned int nrows_dir[2] = { 0, 0 };
+
+    /* ---- multi-GPU matrix partition (Track 2.2 ext, CADO_GPU_NPART>1) ----
+     * Split each direction's CSR into `nparts` contiguous row-chunks placed
+     * round-robin across the visible GPUs; mul() runs one partial SpMV per chunk
+     * (src replicated to each device) and gathers the dst chunks. Default
+     * nparts==1 is exactly the single-device path above (zero overhead). On a box
+     * with one GPU every chunk maps to device 0 — this exercises the
+     * split/multi-launch/gather logic bit-exactly (product == N) but NOT genuine
+     * cross-device execution, which needs 2+ GPUs (documented in docs/gpu-linalg.md).
+     * This path is independent of vector residency (they are alternative
+     * strategies); NPART>1 takes the plain upload/compute/writeback path. */
+    int nparts = 1;
+    struct Part {
+        int dev = 0;
+        uint32_t row0 = 0, nr = 0;        /* this chunk owns output rows [row0,row0+nr) */
+        uint32_t * d_rp = nullptr;        /* sub-CSR rowptr (rebased to 0), nr+1 entries */
+        uint32_t * d_col = nullptr;       /* sub-CSR columns (index the full source) */
+        uint64_t * d_src = nullptr;       /* per-device full src copy */
+        uint64_t * d_dst = nullptr;       /* per-device dst chunk (nr*K limbs) */
+        size_t src_cap = 0, dst_cap = 0;
+    };
+    std::vector<Part> parts[2];           /* per direction */
+    bool parts_ready = false;
     /* device vectors live in the process-global registry (g_pool/g_pin above),
      * so the comm can reach sibling threads' buffers. With CADO_GPU_VECRESIDENT
      * set, a buffer flagged `current` lets mul() skip the H2D; default: always
@@ -535,6 +558,10 @@ struct matmul_gpu : public matmul_interface {
         int const suggest = optimized_direction ^ MM_DIR0_PREFERS_TRANSP_MULT;
         store_transposed = suggest;
         param_list_parse(pl, "mm_store_transposed", store_transposed);
+        if (const char * s = getenv("CADO_GPU_NPART")) {
+            nparts = atoi(s);
+            if (nparts < 1) nparts = 1;
+        }
         gpu_select_device();    /* bind this thread/rank to its GPU (multi-GPU) */
         gpu_install_hooks();    /* make comm-on-device reachable from bwc_base */
     }
@@ -602,6 +629,44 @@ void matmul_gpu<Arith>::ensure_device()
     }
 
     nrows_dir[0] = nr; nrows_dir[1] = nc;
+
+    if (nparts > 1) {
+        /* multi-GPU partition: slice each direction's CSR into nparts row-chunks,
+         * placed round-robin across the visible devices. */
+        int ndev = 1;
+        if (cudaGetDeviceCount(&ndev) != cudaSuccess || ndev < 1) ndev = 1;
+        const std::vector<uint32_t> * rpf[2] = { &rp0, &rp1 };
+        const std::vector<uint32_t> * colf[2] = { &col0, &col1 };
+        unsigned int nrd[2] = { nr, nc };
+        for (int dir = 0; dir < 2; dir++) {
+            parts[dir].clear();
+            unsigned int N = nrd[dir];
+            for (int c = 0; c < nparts; c++) {
+                Part pt;
+                pt.dev = c % ndev;
+                pt.row0 = (uint32_t)((uint64_t) c * N / nparts);
+                uint32_t row1 = (uint32_t)((uint64_t)(c + 1) * N / nparts);
+                pt.nr = row1 - pt.row0;
+                /* sub-CSR: rowptr rebased to 0, columns sliced (still index full src) */
+                uint32_t base = (*rpf[dir])[pt.row0];
+                std::vector<uint32_t> srp(pt.nr + 1);
+                for (uint32_t i = 0; i <= pt.nr; i++) srp[i] = (*rpf[dir])[pt.row0 + i] - base;
+                uint32_t scol_n = (*rpf[dir])[row1] - base;
+                CUCHECK(cudaSetDevice(pt.dev));
+                CUCHECK(cudaMalloc(&pt.d_rp, srp.size() * sizeof(uint32_t)));
+                CUCHECK(cudaMemcpy(pt.d_rp, srp.data(), srp.size() * sizeof(uint32_t), cudaMemcpyHostToDevice));
+                CUCHECK(cudaMalloc(&pt.d_col, (scol_n ? scol_n : 1) * sizeof(uint32_t)));
+                if (scol_n)
+                    CUCHECK(cudaMemcpy(pt.d_col, colf[dir]->data() + base, scol_n * sizeof(uint32_t), cudaMemcpyHostToDevice));
+                parts[dir].push_back(pt);
+            }
+        }
+        cudaSetDevice(0);
+        parts_ready = true;
+        dev_ready = true;
+        return;
+    }
+
     auto up = [](uint32_t * & dptr, const std::vector<uint32_t> & h) {
         CUCHECK(cudaMalloc(&dptr, h.size() * sizeof(uint32_t)));
         CUCHECK(cudaMemcpy(dptr, h.data(), h.size() * sizeof(uint32_t), cudaMemcpyHostToDevice));
@@ -619,6 +684,39 @@ void matmul_gpu<Arith>::mul(void * xdst, void const * xsrc, int d)
     unsigned int nrows = nrows_dir[dir];        /* == dim[!d] */
     unsigned int ncols = nrows_dir[!dir];       /* == dim[d]  */
     ASSERT_ALWAYS(nrows == dim[!d]);
+
+    if (nparts > 1) {
+        /* Partitioned multi-GPU path: one partial SpMV per row-chunk, src
+         * replicated to each chunk's device, dst chunks gathered to the host.
+         * Plain upload/compute/writeback (independent of residency). Sequential
+         * over chunks (correct on any device count); genuine multi-GPU overlap
+         * would use per-device streams — unverified here (1 GPU). */
+        size_t srcbytes = (size_t) ncols * K * sizeof(uint64_t);
+        const uint64_t * src = (const uint64_t *) xsrc;
+        uint64_t * dst = (uint64_t *) xdst;
+        for (Part & pt : parts[dir]) {
+            CUCHECK(cudaSetDevice(pt.dev));
+            if (pt.src_cap < srcbytes) {
+                if (pt.d_src) cudaFree(pt.d_src);
+                CUCHECK(cudaMalloc(&pt.d_src, srcbytes)); pt.src_cap = srcbytes;
+            }
+            CUCHECK(cudaMemcpy(pt.d_src, src, srcbytes, cudaMemcpyHostToDevice));
+            size_t dchunk = (size_t) pt.nr * K * sizeof(uint64_t);
+            if (pt.dst_cap < dchunk) {
+                if (pt.d_dst) cudaFree(pt.d_dst);
+                CUCHECK(cudaMalloc(&pt.d_dst, dchunk ? dchunk : 1)); pt.dst_cap = dchunk;
+            }
+            if (pt.nr) {
+                launch_spmv(K, pt.d_rp, pt.d_col, pt.d_src, pt.d_dst, pt.nr);
+                CUCHECK(cudaGetLastError());
+                CUCHECK(cudaMemcpy(dst + (size_t) pt.row0 * K, pt.d_dst, dchunk, cudaMemcpyDeviceToHost));
+            }
+        }
+        cudaSetDevice(0);
+        n_mul++;
+        iteration[d]++;
+        return;
+    }
 
     size_t srcbytes = (size_t) ncols * K * sizeof(uint64_t);
     size_t dstbytes = (size_t) nrows * K * sizeof(uint64_t);
@@ -694,6 +792,14 @@ matmul_gpu<Arith>::~matmul_gpu()
                 n_d2h, 100.0 * (n_mul - n_d2h) / n_mul);
     }
     for (int i = 0; i < 2; i++) { if (d_rp[i]) cudaFree(d_rp[i]); if (d_col[i]) cudaFree(d_col[i]); }
+    for (int dir = 0; dir < 2; dir++)
+        for (Part & pt : parts[dir]) {
+            if (pt.dev >= 0) cudaSetDevice(pt.dev);
+            if (pt.d_rp) cudaFree(pt.d_rp);
+            if (pt.d_col) cudaFree(pt.d_col);
+            if (pt.d_src) cudaFree(pt.d_src);
+            if (pt.d_dst) cudaFree(pt.d_dst);
+        }
     /* g_pool / g_pinned are process-global (shared across sibling-thread mm's);
      * they are freed at process exit rather than per-mm. */
 }

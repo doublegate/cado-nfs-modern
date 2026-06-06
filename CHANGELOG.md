@@ -164,6 +164,19 @@ Work in progress — see the v3.1.0 roadmap. Landed so far:
   resolve them with no cycle and no CUDA dependency in CPU-only builds. Behaviour
   is byte-identical (null pointers ⇒ host comm). Re-validated end-to-end after a
   full relink: c59 GPU `product == N`.
+- **Intra-node multi-GPU matrix partition (`CADO_GPU_NPART`).** The GPU SpMV
+  backend can split each direction's CSR into `nparts` contiguous output-row
+  chunks placed round-robin across the visible GPUs; `mul()` runs one partial
+  SpMV per chunk (src replicated to each device) and gathers the dst chunks.
+  Default `nparts=1` is exactly the prior single-device path (zero overhead). On
+  a single GPU every chunk maps to device 0, which **exercises the
+  split/multi-launch/gather logic bit-exactly** — `product == N` validated on the
+  c59 at `CADO_GPU_NPART=1/2/3` (identical factors). Genuine cross-physical-device
+  execution (2+ GPUs, and the per-device-stream overlap that would make it a
+  throughput win) is **unverified here — this box has one RTX 3090** — and is the
+  documented next step (`docs/gpu-linalg.md`). The path is independent of vector
+  residency (alternative strategies); `nparts>1` takes the plain
+  upload/compute/writeback path.
 - **GPU linalg at scale — measured (Track 2.2 headline).** A scaling sweep
   (`bench/gpu-spmv-bench.cu`, b64, bit-exact at every size) shows the GPU SpMV
   win **grows with N**: GPU warp kernel 28.9→7.9 Gnz/s as the matrix grows

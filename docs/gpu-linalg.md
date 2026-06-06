@@ -323,6 +323,20 @@ kernel tuning (ELL, column sorting, shared-mem `src`) is secondary.
    node and multi-node via the unchanged MPI comm layer — the natural HPC
    scale-out and where the GPU's aggregate-bandwidth advantage compounds.
 
+   **Intra-node partition (implemented, `CADO_GPU_NPART`).** Independent of the
+   per-rank model, the backend can also split *one* rank's matrix across several
+   local GPUs: each direction's CSR is sliced into `nparts` contiguous output-row
+   chunks placed round-robin across `cudaGetDeviceCount()` devices, and `mul()`
+   runs one partial SpMV per chunk (src replicated) then gathers the dst chunks.
+   `nparts=1` (default) is the unchanged single-device path. Validation reality on
+   this box (one RTX 3090): `CADO_GPU_NPART=1/2/3` all return `product == N` on the
+   c59 — so the **split/multi-launch/gather logic is bit-exact** — but every chunk
+   maps to device 0, so genuine cross-device execution and the per-device-stream
+   overlap that turns the partition into a throughput win are **unverified** (need
+   2+ physical GPUs). On one GPU the partition is pure overhead; it exists for the
+   multi-GPU case. This path is independent of vector residency (alternative
+   strategies); `nparts>1` uses plain upload/compute/writeback.
+
 ## Status
 
 - **Done & validated:**
