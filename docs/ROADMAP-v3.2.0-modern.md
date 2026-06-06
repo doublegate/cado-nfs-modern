@@ -35,11 +35,21 @@ kernel, real multi-GPU) it started.
 ## Track A — Algorithm / new techniques
 
 - **A1. 3-D lattice sieving** ("A New Angle on Lattice Sieving for the NFS",
-  arXiv 2001.10860). A different lattice enumeration in 3 dimensions, reported as
-  a meaningful speedup over CADO's standard 2-D lattice sieve. **CPU,
-  locally testable** — the rare algorithm-level sieving win measurable on this
-  box. Gate: identical *valid* relation set vs the 2-D sieve on a seeded c100.
-  *Highest-value algorithm item.*
+  arXiv 2001.10860). **RE-SCOPED — original framing was a misread (honest
+  correction).** The paper's 3-D (and higher-D) enumeration is for the **Tower NFS
+  / discrete log in extension fields** (its headline is a 133-bit subgroup DLP in
+  𝔽_{p⁶}, a 423-bit field, ≈3× the prior record); the extra dimensions exist
+  because TNFS sieves over higher-degree elements `a + b·x + c·x² …`. For ordinary
+  **integer factorization the relations are (a,b) pairs — inherently 2-D** — and
+  CADO's factorization siever is 2-D *because of that*, not as a limitation (the
+  q-lattice has exactly two basis vectors; survivors map (i,j)→(a,b)). So **there
+  is no "seeded c100" 3-D win**: the stated gate is not achievable, and 3-D sieving
+  would only help the fork's extension-field **DLP** side — research-grade, a large
+  effort, and *not* "locally testable on a c100." This avenue is therefore closed
+  for the factorization track (recorded like the PGO / column-reorder negatives);
+  any future pursuit belongs under **A4 (DLP/exTNFS)**. The freed sequencing slot
+  goes to the genuinely high-value sieving + polyselect work (C2 collision-search
+  offload, B1 AVX-512 sieving, D3 sieve fan-out).
 - **A2. Mixed-representation ECM cofactorization** (Springer 2020, "Faster
   Cofactorization with ECM Using Mixed Representations"). Upgrade the in-sieve
   `facul` ECM and the v3.1.0 GPU pre-factor/cofactor ECM to mixed
@@ -147,7 +157,7 @@ Building on 3.1.0's `--json-status`, `/status`, `/dashboard`, clap CLIs, and
 |---|------|--------|------|--------------------------------------|
 | 1 | **C1** better SpMV kernel | Med | Low | measurable now; bigger at scale |
 | 2 | **C2** GPU polyselect | Med | Low–Med | **real single-machine win** (proven in msieve) |
-| 3 | **A1** 3-D lattice sieving | Med–High | Med | **the rare locally-testable sieving win** |
+| 3 | ~~**A1** 3-D lattice sieving~~ → **C2 collision-search offload** | High | Med | A1 closed (TNFS/DLP only, not c100 — honest correction); the collision-search GPU offload is the real polyselect win |
 | 4 | **E2/E3** autotuner + planner | Med | Low | UX + cuts variance; no raw speed |
 | 5 | **A2** mixed-rep ECM | Med | Med | feeds C3 + CPU cofactor |
 | 6 | **A3** parallel merge | Med | Med | cuts the high-variance filtering phase |

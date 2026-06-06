@@ -141,6 +141,54 @@ are the foundation for, and which is the documented next step (below). The flag 
 `.cu` ship so that work, and larger-`N` / multi-GPU experiments, start from a
 correct, integrated base rather than a prototype.
 
+## Collision search on the GPU — the real win (foundation validated)
+
+The honest negative above points straight at the fix: the win is not in offloading
+root-finding (a fast, minority phase) but in offloading the **collision search** —
+the memory-bound *bulk* of stage-1, the part that **grows with N**, and the part
+msieve has run on the GPU since 2009.
+
+**What the collision search is.** For each prime `p` with a lifted root `r`, CADO's
+dispatch (`polyselect_proots_dispatch_to_shash*`) emits *every* `u ≡ r (mod p²)` in
+`[−umax, umax)` — an arithmetic progression of step `ppl = p²` — and a **collision**
+is two equal `u` from *different* primes (by CRT that `u` gives a polynomial in which
+both `p²` divide the relevant quantity → a candidate). The CPU finds these with a
+tuned two-level open-addressing hash (`shash`/`shash2`). The total emitted multiset
+is `Σ_p 2·umax/p²`, dominated by the smaller primes and **tens of millions of `u` at
+realistic `umax`** — that is the bulk memory traffic of stage-1.
+
+**Why this one sidesteps the Amdahl/PCIe trap.** The GPU-friendly reformulation is
+**generate → radix-sort → detect adjacent-equal**, with the enormous intermediate
+`u`-array **resident on the device**: only the small `(p, r)` table goes in and only
+the few collisions come back. Unlike root-finding (where the data round-tripped and
+the CPU was already fast), here the dominant cost (generation + the O(n log n) sort
+over tens of millions of values) lives entirely on the GPU and never crosses PCIe.
+
+**Foundation kernel — validated bit-exact (`bench/gpu-polyselect-collision.cu`).**
+Builds the *exact* CADO emission multiset (same two `u = u0 ± k·ppl` loops), sorts it
+on the GPU (`thrust::sort_by_key`, carrying the source-prime index), and flags equal
+adjacent `u` from different primes. Gate = bit-exact vs a CPU reference (`std::sort` +
+adjacent compare): on **44.9 M `u`-values** (4459 primes in `[50000,100000]`,
+`umax = 2.5·10¹³`, 539 MB device-resident), the **sorted multiset is identical (0
+mismatches)** and the **collision set is identical** (31 collisions — 8 injected +
+23 natural birthday collisions — found by both). **GPU generate+sort+detect 40.3 ms
+vs CPU `std::sort` 5270 ms (≈130×, 1.1 Gu/s)**. *Honest scoping of the number:* the
+130× is against a naïve `std::sort`; CADO's `shash` is an O(n) hash, faster than
+`std::sort`, so the realistic in-situ speedup vs `shash` is smaller — it will be
+measured during the live integration, exactly as the root-finder's was. What this
+proves now: the whole collision multiset can be built, sorted, and de-duplicated on
+the device, bit-exactly, at >1 Gu/s with no PCIe traffic for the bulk data.
+
+**Next step — live integration.** Intercept at the dispatch point
+(`polyselect_collisions.cpp`, the `shash2` subtask): when `CADO_GPU_POLYSELECT` is
+set and the hook is installed, run the GPU generate+sort+detect on the thread's
+`(p, r, umax)` instead of `dispatch_to_shash2 + shash2_find_collision`, returning the
+colliding `(u, p₁, p₂)` so the existing `match`/`gmp_match` path forms the polynomial
+unchanged. The candidate set (and therefore Murphy-E and `product == N`) stays
+identical; the win is wall-clock at large `umax`. Fused with the already-shipped GPU
+root-finder, this is the msieve-style "stage-1 resident on the GPU" model, and the
+documented endgame of Track C2.
+
 ## Integration into the collision search (original design notes)
 
 With the root set validated, the wiring is well-defined. The per-prime CPU loop in

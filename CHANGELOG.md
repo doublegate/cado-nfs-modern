@@ -134,6 +134,40 @@ validated-at-degenerate-path code + design.
   larger `N` — the documented next step, for which this validated root-finder and
   hook ABI are the foundation. Full analysis in `docs/gpu-polyselect.md`.
 
+### GPU (C2) — collision-search offload, foundation kernel (the real win; bit-exact)
+
+- **GPU collision search, validated bit-exact** (`bench/gpu-polyselect-collision.cu`).
+  The collision search is the memory-bound *bulk* of polyselect stage-1 and the part
+  that **grows with N** (so, unlike root-finding, no Amdahl ceiling). For each prime
+  `p` with lifted root `r` CADO emits every `u ≡ r (mod p²)` in `[−umax, umax)` and a
+  collision is two equal `u` from different primes. The GPU-friendly reformulation —
+  **generate → `thrust::sort_by_key` → detect adjacent-equal**, with the whole
+  `u`-multiset **resident on the device** (only the small `(p,r)` table in, only the
+  few collisions out) — sidesteps the PCIe round-trip that sank the root-finding
+  offload. Gate = bit-exact vs a CPU `std::sort` reference on **44.9 M `u`-values**
+  (4459 primes in `[50000,100000]`, `umax = 2.5·10¹³`, 539 MB resident): **sorted
+  multiset identical (0 mismatches)** and **collision set identical** (31 — 8
+  injected + 23 natural birthday collisions). **GPU 40.3 ms vs CPU `std::sort`
+  5270 ms (≈130×, 1.1 Gu/s).** Honest: the 130× is vs `std::sort`; CADO's `shash` is
+  an O(n) hash (faster than `std::sort`), so the real in-situ speedup vs `shash` is
+  smaller and will be measured during live integration (same discipline as the
+  root-finder). What this proves: the entire collision multiset can be built, sorted
+  and de-duplicated on the GPU, bit-exactly, with no PCIe traffic for the bulk data —
+  the foundation for the msieve-style "stage-1 resident on the GPU" endgame. Design +
+  the live-integration plan in `docs/gpu-polyselect.md`.
+
+### Roadmap (A1) — 3-D lattice sieving re-scoped (honest correction)
+
+- **A1 closed for the factorization track.** The roadmap listed 3-D lattice sieving
+  (arXiv 2001.10860) as a locally-testable `c100` factorization win. Research showed
+  this is a **misread**: that paper's 3-D/higher-D enumeration is for the **Tower NFS
+  / extension-field discrete log** (its result is a 𝔽_{p⁶} DLP), where elements have
+  degree ≥ 3; **integer-factorization relations are (a,b) pairs — inherently 2-D**,
+  and CADO's siever is 2-D because of that, so the stated "seeded c100" gate is not
+  achievable. Recorded as a negative (like PGO / column-reorder); any 3-D pursuit
+  belongs under DLP/exTNFS (A4), not the factorization track. `docs/ROADMAP-v3.2.0-modern.md`
+  updated.
+
 Post-`3.1.0-modern` housekeeping carried in this cycle (no code/behaviour change):
 
 - **Project renamed to `cado-nfs-modern`.** Both the local checkout and the
