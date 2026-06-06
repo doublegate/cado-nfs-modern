@@ -52,6 +52,25 @@ validated-at-degenerate-path code + design.
   already reorders). The large-N SpMV is gather-latency-bound; the better levers
   are the adaptive vec kernel, residency, and multi-GPU (`docs/gpu-linalg.md`).
 
+### GPU (C2) — polynomial selection (profile + foundation kernel)
+
+- **Profiled CADO polyselect stage-1** (the GPU target per the v3.2.0 reframe;
+  proven GPU-friendly in msieve since 2009, absent in CADO). `perf` puts the hot
+  self-time in **per-prime modular root finding** — `modredcul_intinv` (16 %, the
+  modular inverse), `modul_poly_div_r`/`xpowmod` (root finding of `f mod p`,
+  ~11 %), plus `L2_skewness`/`double_poly_compute_roots` (size scoring, ~15 %) and
+  the collision hash (~10 %). Root finding over thousands of independent primes is
+  the GPU sweet spot.
+- **Foundation kernel, bit-exact** (`bench/gpu-polyselect-modinv.cu`): a GPU
+  batched single-word modular inverse (the 16 % hottest leaf), validated bit-exact
+  vs GMP over 200 000 (a, p) pairs (0 wrong; 469 M inv/s on an RTX 3090). Proves
+  the per-prime modular arithmetic runs correctly on the GPU.
+- **Design + plan** in `docs/gpu-polyselect.md`: the batched per-prime
+  root-finding kernel (`gcd(x^p − x, f) mod p`, reusing the validated modinv) →
+  feed the `shash` collision search → GPU size scoring → a `--gpu-polyselect`
+  flag, gated on matching polynomial quality (Murphy-E) + an end-to-end
+  `product == N`. The full module lands incrementally; this is the foundation.
+
 Post-`3.1.0-modern` housekeeping carried in this cycle (no code/behaviour change):
 
 - **Project renamed to `cado-nfs-modern`.** Both the local checkout and the
