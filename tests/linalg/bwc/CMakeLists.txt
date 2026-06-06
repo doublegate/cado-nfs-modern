@@ -1060,3 +1060,18 @@ cado_define_test(linalg_determinant_p2
     EXPECT_FAIL
     TARGET_DEPENDENCIES bwc_full_gfp
 )
+
+# GPU GF(2) reduce+broadcast regression test (v3.1.0-modern Track 2.2). Guards the
+# device kernels behind the comm-on-device hook. Built only with -DENABLE_GPU=ON;
+# the test itself exits 0 (skips) when no CUDA device is present.
+if(HAVE_GPU_ECM)
+    if(NOT DEFINED CADO_GPU_ARCH)
+        set(CADO_GPU_ARCH 86)
+    endif()
+    add_executable(test_gpu_vecreduce test_gpu_vecreduce.cu)
+    set_target_properties(test_gpu_vecreduce PROPERTIES
+        CUDA_ARCHITECTURES "${CADO_GPU_ARCH}" CUDA_STANDARD 20)
+    target_compile_options(test_gpu_vecreduce PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-O3>)
+    target_link_libraries(test_gpu_vecreduce CUDA::cudart)
+    add_test(NAME test_gpu_vecreduce COMMAND test_gpu_vecreduce)
+endif()

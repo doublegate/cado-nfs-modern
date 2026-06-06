@@ -60,6 +60,23 @@ Work in progress — see the v3.1.0 roadmap. Landed so far:
   `bucket`**. This flips the bottleneck to **72% transfers / 28% kernel**, so full
   vector residency (the scoped multi-step vector-layer port in
   `docs/gpu-linalg.md`) is now the dominant remaining single-machine win.
+- **Comm-on-device foundation** (toward full vector residency — the 72% transfer
+  share). Three validated pieces, each gated by a verified factorization
+  (`product == N`): (1) a **process-global device-vector registry** keyed by host
+  pointer (so the BWC comm can reach *sibling threads'* device buffers — all
+  threads share the CUDA context); (2) a **`bwc_base`↔GPU hook ABI**
+  (`matmul-gpu-hooks.h`, function pointers the GPU backend installs at init, so
+  `bwc_base` keeps no hard CUDA dependency); (3) a **bit-exact device GF(2)
+  reduce/broadcast** wired into `mmt_vec_allreduce` behind `CADO_GPU_DEVCOMM`.
+  `product == N` on the c60 across thread grids `-t 2/4/6/8` and on a c70, in
+  default, `DEVCOMM`, and `VECRESIDENT+DEVCOMM` modes; regression-guarded by a new
+  `test_gpu_vecreduce` ctest (GPU builds only). **Honest scope:** this is
+  validated *plumbing*, not yet a transfer saver — it uploads + writes back for
+  correctness, and `allreduce` is the *twist/prep* comm, **not** the per-iteration
+  hot comm (`mmt_vec_reduce`+`mmt_vec_broadcast`). The transfer-eliminating win
+  needs the `reduce`+`broadcast` port plus complete host-write-invalidation /
+  host-read-sync coverage across prep/secure/twist/krylov (scoped in
+  `docs/gpu-linalg.md`).
 
 ### UI/UX (Track 3.1) — run-status reporting
 
