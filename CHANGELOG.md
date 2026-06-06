@@ -208,6 +208,24 @@ Work in progress — see the v3.1.0 roadmap. Landed so far:
   with v3.0.0. The `-O3 -march=native` host-ISA codegen already captures the gain;
   PGO's layout/inlining choices do not help this siever. Recorded, not adopted.
 
+### CPU (Track 1.3) — hot-scalar micro-opt (profiled; no safe win)
+
+- **Profiled the siever; the hot loops are already optimally tuned.** A `perf`
+  profile of the c120 microbench workload puts the self-time in
+  `fill_in_buckets` (~12%), `plattice_info` ctor (~11%), `sieve_small_bucket_region`
+  (~10%), ECM `stage2_one_w` (~10%), `invmod_redc_32` (~9.5%), and
+  `apply_buckets_inner` (~7%). The bucket-apply scatter — the obvious software-
+  prefetch candidate — is already 16×-unrolled with batched 64-bit reads, SIMD,
+  and an update-stream prefetch (`las-apply-buckets.hpp`), and its scatter target
+  `S[x]` is cache-resident *by design* (bucket regions are sized to fit cache).
+  The remaining candidate, batched modular inversion (Montgomery's trick) in
+  `invmod_redc_32`/`plattice_info`, needs an invasive restructuring of per-prime
+  lattice setup — high correctness risk on a tight 9.5% routine, with expected
+  nil-to-negative payoff given the two PGO negatives and how hand-tuned the code
+  already is. **No micro-opt adopted**; the `-O3 -march=native` codegen win
+  already captures what is safely available. Recorded per the measure-and-record
+  ethos.
+
 ### UI/UX (Track 3.1) — run-status reporting
 
 - **`--json-status FILE`** writes a machine-readable status snapshot (schema
