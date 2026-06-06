@@ -330,11 +330,24 @@ cache-resident regime (49.5 vs 39.4 Gnz/s at 0.8 M rows), a wash at large N wher
 the random `src` gather is the wall — hence the size gate, so there is no large-N
 regression. `product == N` end-to-end on both paths.
 
-**Next (C1, large-N lever):** the random-CSR `src` gather is the large-N wall; the
-real win there is **column reordering** of the *filtered* matrix for locality (so
-a row's nonzeros hit nearby `src`) — an `mmt_vec`/matrix-layer change that the
-synthetic random-CSR bench cannot demonstrate, to be measured on real c100–c120
-matrices via `bench_matcache` / an end-to-end run.
+**C1 column-reordering investigation — rejected (measured).** The random-CSR
+`src` gather is the large-N wall, so the candidate lever was reordering the
+filtered matrix's columns for locality. Measured the available headroom directly
+(8 M rows, 30 nnz/row, RTX 3090): random columns **8.1 Gnz/s**; a *loose* band
+(each row's nonzeros within ±4096 of a per-row center) **9.1 Gnz/s = 1.1×**; a
+*tight* band (±512) **13.8 Gnz/s = 1.7×**; within-row column sorting adds only
+**~2 %**. So locality helps only if reordering can produce *tight* bands — but NFS
+matrices have a **skewed degree distribution** (a few very dense small-prime
+columns + a long sparse tail), which RCM/banding cannot pack into ±512-wide rows,
+so the realistic gain is the loose-band ~1.1×. That does **not** justify a global
+symmetric reorder + the consistent `mmt_vec` permutation (both BWC directions, the
+forward and transpose CSRs) it would require in the validated matmul layer; and
+CADO's `balancing_workhorse` already reorders the matrix. Within-row sorting
+(~2 %) is likewise not worth its build-time cost. **Conclusion:** the large-N SpMV
+is gather-latency-bound and column reordering is a poor lever here — the better
+ones are the adaptive vec kernel above (cache-resident regime), full vector
+residency (transfers, done), and spreading the matrix across more GPUs
+(`CADO_GPU_NPART` / multi-node, Track D) where aggregate bandwidth compounds.
 3. **Multi-GPU / multi-node**: BWC already splits the matrix across an `nh×nv`
    MPI grid (`balancing_workhorse`), each rank owning a submatrix; the GPU backend
    slots in at each rank's local `mm->mul()`. One GPU per rank → multi-GPU on a

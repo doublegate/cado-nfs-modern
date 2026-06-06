@@ -41,9 +41,16 @@ validated-at-degenerate-path code + design.
   at 0.8 M rows; up to ~27 vs ~15 at 1 M); at large N (≥ ~2 M rows / wider blocks)
   it is a wash or worse, so the adaptive dispatch keeps warp32 there — **no
   regression**. End-to-end `product == N` on the c59 with both the adaptive (→vec)
-  default and a forced `CADO_GPU_SPMV=warp` run. The large-N lever (column
-  reordering on real filtered matrices) is the documented next C1 step
-  (`docs/gpu-linalg.md`); the synthetic random-CSR bench cannot show it.
+  default and a forced `CADO_GPU_SPMV=warp` run.
+- **Column reordering for the large-N gather — investigated and rejected
+  (honest negative).** Measured the locality headroom directly (8 M rows, RTX
+  3090): random columns 8.1 Gnz/s, a loose band only **1.1×**, a tight band 1.7×,
+  within-row sorting **~2 %**. NFS matrices' skewed degree distribution (dense
+  small-prime columns) can't be packed into tight bands, so the realistic gain
+  (~1.1×) doesn't justify a global symmetric reorder + the consistent `mmt_vec`
+  permutation it would need in the validated matmul layer (and CADO balancing
+  already reorders). The large-N SpMV is gather-latency-bound; the better levers
+  are the adaptive vec kernel, residency, and multi-GPU (`docs/gpu-linalg.md`).
 
 Post-`3.1.0-modern` housekeeping carried in this cycle (no code/behaviour change):
 
