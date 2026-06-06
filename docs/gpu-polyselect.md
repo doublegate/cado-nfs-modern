@@ -32,22 +32,36 @@ Two clusters dominate:
 The **collision search** (hash dispatch, ~10 %) is the memory-bound part msieve
 keeps on GPU too, but is the harder/secondary target.
 
-## Done — foundation kernel (bit-exact)
+## Done — foundation kernels (bit-exact)
 
-`bench/gpu-polyselect-modinv.cu`: a GPU batched **single-word modular inverse**
-(the 16 % hottest leaf), validated **bit-exact vs GMP** over 200 000 (a, p) pairs
-(0 wrong; 469 M inv/s on an RTX 3090). The modular inverse is mathematically
-unique, so vs-GMP is the meaningful gate (independent of CADO's REDC
-representation). This proves the per-prime modular arithmetic runs correctly on
-the GPU and gives the building block the root-finding kernel needs.
+1. **Modular inverse** (`bench/gpu-polyselect-modinv.cu`): a GPU batched
+   single-word modular inverse (the 16 % hottest leaf), validated **bit-exact vs
+   GMP** over 200 000 (a, p) pairs (0 wrong; 469 M inv/s on an RTX 3090). The
+   inverse is mathematically unique, so vs-GMP is the meaningful gate (independent
+   of CADO's REDC representation).
+2. **Per-prime root finding** (`bench/gpu-polyselect-roots.cu`): for a fixed
+   degree-d polynomial f and a batch of primes p, find all roots of f mod p — one
+   thread per prime, direct Horner evaluation over F_p. Exactly correct by
+   construction (roots = {a : f(a) ≡ 0}); validated **bit-exact vs a CPU reference
+   + a self-check** (every root satisfies f(r) ≡ 0): 0 mismatch / 0 self-check-bad
+   over 5133 primes (deg 6). **GPU 45.9 ms vs CPU 20-thread 277.6 ms = 6.0×.**
+   *Honest limitation:* direct evaluation is **O(p) per prime**, so it is a win
+   only in the small-prime regime — one-thread-per-prime is load-imbalanced and
+   slow for large p. The asymptotically-better method (next sub-step) is
+   `gcd(x^p − x, f) mod p` (O(d² log p), independent of p's magnitude), built from
+   polynomial arithmetic mod f reusing the validated modular inverse.
+
+Together these prove the per-prime modular arithmetic **and** root finding run
+correctly on the GPU — the building blocks the collision-feed needs.
 
 ## Plan — the GPU polyselect path
 
-1. **Batched per-prime root-finding kernel** (the ~30–40 % target): for a batch of
-   primes p, compute the roots of `f mod p` via `gcd(x^p − x, f) mod p` (repeated
-   squaring for `x^p mod f`, then root extraction), reusing the single-word REDC /
-   modinv arithmetic validated above. Bit-exact vs CADO's `modul_poly_roots` over a
-   prime batch.
+1. **Batched per-prime root-finding kernel** (the ~30–40 % target): the
+   direct-evaluation kernel above covers the small-prime regime (done, 6×). The
+   remaining sub-step is the `gcd(x^p − x, f) mod p` method (`x^p mod f` by repeated
+   squaring + polynomial gcd, then Cantor–Zassenhaus root extraction), reusing the
+   validated single-word modinv, for the large-p regime where O(p) is too slow.
+   Bit-exact vs CADO's `modul_poly_roots` over a prime batch.
 2. **Feed the collision search**: stream the GPU `proots` into the existing
    `shash` collision machinery (keep the hash/match on the side that wins — likely
    CPU first, GPU later), so the GPU computes roots while the CPU collides.

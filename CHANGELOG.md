@@ -61,10 +61,17 @@ validated-at-degenerate-path code + design.
   ~11 %), plus `L2_skewness`/`double_poly_compute_roots` (size scoring, ~15 %) and
   the collision hash (~10 %). Root finding over thousands of independent primes is
   the GPU sweet spot.
-- **Foundation kernel, bit-exact** (`bench/gpu-polyselect-modinv.cu`): a GPU
-  batched single-word modular inverse (the 16 % hottest leaf), validated bit-exact
-  vs GMP over 200 000 (a, p) pairs (0 wrong; 469 M inv/s on an RTX 3090). Proves
-  the per-prime modular arithmetic runs correctly on the GPU.
+- **Foundation kernels, bit-exact:**
+  - *modular inverse* (`bench/gpu-polyselect-modinv.cu`): GPU batched single-word
+    modular inverse (the 16 % hottest leaf), bit-exact vs GMP over 200 000 (a, p)
+    pairs (0 wrong; 469 M inv/s on an RTX 3090).
+  - *per-prime root finding* (`bench/gpu-polyselect-roots.cu`): roots of a degree-d
+    polynomial mod a batch of primes, one thread/prime by direct Horner evaluation
+    over F_p — exactly correct by construction, validated bit-exact vs a CPU
+    reference + a self-check (f(r) ≡ 0): 0 mismatch over 5133 primes (deg 6),
+    **GPU 45.9 ms vs CPU 20-thread 277.6 ms = 6.0×**. Honest: direct eval is O(p),
+    a win only in the small-prime regime; the `gcd(x^p − x, f)` method (p-magnitude-
+    independent) is the next sub-step for large p.
 - **Design + plan** in `docs/gpu-polyselect.md`: the batched per-prime
   root-finding kernel (`gcd(x^p − x, f) mod p`, reusing the validated modinv) →
   feed the `shash` collision search → GPU size scoring → a `--gpu-polyselect`
