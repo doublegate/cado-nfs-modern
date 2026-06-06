@@ -79,8 +79,19 @@ validated-at-degenerate-path code + design.
     **bit-exact vs direct-eval** (full root multiset): 0 mismatch / 0 self-check-bad
     over 3245 primes (deg 6, p < 30 000); and **5000 primes near 10⁹ in 27.8 ms**
     (0 self-check-bad) where direct-eval's O(p) is infeasible. The production
-    root-finder for the full prime range; next is matching CADO's exact
-    `modul_poly_roots` + the collision-search integration behind `--gpu-polyselect`.
+    root-finder for the full prime range.
+- **Collision-search integration — exact target validated + designed.** CADO's
+  per-prime step is `roots_mod_uint64(Ñ mod p, d, p)` = solve `x^d ≡ Ñ mod p` (the
+  d-th roots, not an arbitrary polynomial). Re-validated the gcd kernel on that
+  exact case (`f = x^d − a`): 0 mismatch / 0 self-check-bad over 3245 primes
+  (p < 30 000) + 5000 near 10⁹, so its root set matches `roots_mod_uint64` across
+  the full range. `docs/gpu-polyselect.md` now specifies the precise wiring: batch
+  `(p, Ñ mod p)` → one GPU launch → `roots_lift` (CPU) + `polyselect_proots_add`,
+  leaving the `shash` collision search byte-identical; a `polyselect-gpu.cu` under
+  `-DENABLE_GPU=ON` reached via the `matmul-gpu-hooks` pattern; `--gpu-polyselect`
+  (default off) gated on matching Murphy-E + `product == N`. The full live wiring
+  into the multithreaded proots subtask is the remaining (large) step, scoped
+  honestly; the kernels and the exact target are validated.
 - **Design + plan** in `docs/gpu-polyselect.md`: the batched per-prime
   root-finding kernel (`gcd(x^p − x, f) mod p`, reusing the validated modinv) →
   feed the `shash` collision search → GPU size scoring → a `--gpu-polyselect`

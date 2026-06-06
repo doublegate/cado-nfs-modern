@@ -66,6 +66,52 @@ Together these prove the per-prime modular arithmetic **and** root finding (both
 small- and large-prime regimes) run correctly on the GPU — the building blocks the
 collision-feed needs.
 
+**Validated on the *exact* polyselect polynomial.** CADO's per-prime root step is
+`roots_mod_uint64(rp, Ñ mod p, d, p)` — solve **`x^d ≡ Ñ (mod p)`** (`utils/roots_mod.cpp`,
+"solve x^k = a mod p"), i.e. the d-th roots of `a = Ñ mod p`, not an arbitrary
+polynomial. Re-ran the gcd kernel with `f = x^d − a` (the polyselect case, d=6):
+**0 mismatch / 0 self-check-bad** over 3245 primes (p < 30 000) and 5000 primes
+near 10⁹ — so the GPU kernel's root set matches `roots_mod_uint64` across the full
+prime range. (CADO uses a specialised d-th-root algorithm; the gcd kernel returns
+the same *set*, which is what the collision search consumes.)
+
+## Integration into the collision search (design)
+
+With the root set validated, the wiring is well-defined. The per-prime CPU loop in
+`polyselect_proots_compute_subtask` (`polyselect/polyselect_proots.cpp`) is:
+
+```
+for each prime p_i:  rp = roots_mod_uint64(Ñ mod p_i, d, p_i)   # <-- GPU target
+                     roots_lift(rp, …, m0, p_i)                  # cheap, stays CPU
+                     polyselect_proots_add(R, |rp|, rp, i)       # stores R->roots[i]
+```
+
+and the collision search (`polyselect.cpp` / `polyselect_shash`) consumes
+`R->roots`. So the offload is a clean batch-replace of the `roots_mod_uint64` call:
+
+1. **Gather** `(p_i, a_i = Ñ mod p_i)` for the whole primes table.
+2. **One GPU launch** computing `x^d ≡ a_i mod p_i` for all i (the validated
+   kernel), returning each prime's root set + count.
+3. **Scatter**: per prime, `roots_lift` (CPU, cheap) + `polyselect_proots_add` —
+   so `R` is byte-identical to the CPU path and the **shash collision search is
+   unchanged**.
+4. **Build**: a `polyselect/polyselect-gpu.cu` built only under `-DENABLE_GPU=ON`,
+   reached from the CUDA-free `polyselect_proots.cpp` through a hook ABI (the
+   `matmul-gpu-hooks` pattern), so the CPU path is untouched when no GPU backend
+   is loaded.
+5. **Flag + gate**: `cado-nfs.py --gpu-polyselect` (default off). Because the root
+   *set* is identical, the candidate polynomials — and thus the best one — are the
+   same; the gate is **matching Murphy-E of the selected polynomial + an
+   end-to-end `product == N`** factorization using the GPU-selected polynomial.
+
+**Honest scope (remaining).** The full live wiring is a large, careful change to a
+performance-critical, multithreaded subsystem: the proots subtask is split across
+the thread team (the GPU version has one thread issue the batched launch while the
+team coordinates), the CUDA build must be added to `polyselect/` (today pure C++),
+and the end-to-end Murphy-E / `product == N` gate must pass. The kernels and the
+exact target are validated here; the live integration is the next step, taken
+incrementally so each piece stays gated.
+
 ## Plan — the GPU polyselect path
 
 1. **Batched per-prime root-finding kernel** (the ~30–40 % target): **done** —
