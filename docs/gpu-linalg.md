@@ -185,11 +185,41 @@ path (no missed host write).
 But the skip is **correct yet inert**: the comm runs after *every* SpMV and
 invalidates the src, so it is always re-uploaded — the H2D share does not drop.
 This empirically confirms the analysis: **the win requires moving the comm itself
-onto the device** (using the validated reduce/broadcast kernel), so the vector
-stays device-authoritative through the comm and the (already-proven-correct) skip
-finally triggers. That is the next, now-localized step. The remaining pieces are
-then the per-interval host syncs (twist/save) and GPU `x_dotprod`, all on a
-control plane whose correctness is already gated by `product == N`.
+onto the device**, so the vector stays device-authoritative through the comm and
+the (already-proven-correct) skip finally triggers.
+
+### Comm-on-device — the executable design (next, focused effort)
+
+Reading the comm makes the shape precise. `mmt_vec_allreduce`
+(`matmul_top_comm.cpp:738`) and `matmul_top_mul_comm` reduce **across sibling
+threads' *host* buffers** (`v.sibling(k).v`, chunked by `thread_chunk`,
+`vec_add_and_reduce` = XOR, then `vec_set` broadcast), in `bwc_base` — a layer
+with **no CUDA and no `mm` handle**. So this is a small rearchitecture, not a
+surgical edit:
+
+1. **Process-global device registry** (replace the per-`mm` pool): a thread-safe
+   `host_ptr → {device buffer, current}` map, since the comm touches *siblings'*
+   buffers and all threads share the CUDA context. The SpMV uses it as today.
+2. **A registered CUDA hook** exposed from the GPU lib via a function pointer the
+   GPU backend installs at init (so `bwc_base` keeps no hard CUDA dependency):
+   `gpu_comm_reduce(host_chunks[], ncores, chunk_items, elt_stride)` runs the
+   chunked XOR-reduce + broadcast **on the device buffers** and marks them
+   `current` (host stale). `mmt_vec_allreduce` / `matmul_top_mul_comm` call it
+   when every participating buffer is registered; else fall back to the host path.
+3. **`from_device(host_ptr)` syncs** at the host-read points the inner loop keeps:
+   `x_dotprod` (or move it to the GPU via the validated kernel), the online
+   `check`, `mmt_vec_save`, and `twist/untwist` — pull the device buffer back to
+   host only there (per-interval, not per-iteration).
+4. **MPI**: for >1 job, stage through host at the registry boundary (or CUDA-aware
+   MPI later); single-node needs none.
+
+With (1)–(3), the inner loop's SpMV→comm→SpMV runs entirely on device buffers, the
+H2D/D2H vanish for the steady iterations, and the **already-`product==N`-validated
+invalidation** keeps it correct. Gate: a full factorization in default *and*
+`CADO_GPU_VECRESIDENT` modes (`product == N`) after each of (1)–(3).
+
+This is the substantial, focused next effort; the control plane it builds on is
+done and correctness-gated.
 
 Each step is correctness-gated by a full verified factorization. Until then, the
 backend captures the bounded win (pinning) and is bit-exact.
