@@ -69,9 +69,18 @@ validated-at-degenerate-path code + design.
     polynomial mod a batch of primes, one thread/prime by direct Horner evaluation
     over F_p — exactly correct by construction, validated bit-exact vs a CPU
     reference + a self-check (f(r) ≡ 0): 0 mismatch over 5133 primes (deg 6),
-    **GPU 45.9 ms vs CPU 20-thread 277.6 ms = 6.0×**. Honest: direct eval is O(p),
-    a win only in the small-prime regime; the `gcd(x^p − x, f)` method (p-magnitude-
-    independent) is the next sub-step for large p.
+    **GPU 45.9 ms vs CPU 20-thread 277.6 ms = 6.0×**. Direct eval is O(p), a win
+    only in the small-prime regime.
+  - *gcd-based root finding* (`bench/gpu-polyselect-roots-gcd.cu`): the
+    asymptotically-better, p-magnitude-independent method — `h = x^p mod f` by
+    binary exponentiation (poly multiply mod f), `g = gcd(h − x, f)`, then
+    Cantor–Zassenhaus split into linear factors, all over F_p reusing the validated
+    modular arithmetic (`__host__ __device__`, identical GPU/CPU code). Validated
+    **bit-exact vs direct-eval** (full root multiset): 0 mismatch / 0 self-check-bad
+    over 3245 primes (deg 6, p < 30 000); and **5000 primes near 10⁹ in 27.8 ms**
+    (0 self-check-bad) where direct-eval's O(p) is infeasible. The production
+    root-finder for the full prime range; next is matching CADO's exact
+    `modul_poly_roots` + the collision-search integration behind `--gpu-polyselect`.
 - **Design + plan** in `docs/gpu-polyselect.md`: the batched per-prime
   root-finding kernel (`gcd(x^p − x, f) mod p`, reusing the validated modinv) →
   feed the `shash` collision search → GPU size scoring → a `--gpu-polyselect`

@@ -49,19 +49,30 @@ keeps on GPU too, but is the harder/secondary target.
    only in the small-prime regime — one-thread-per-prime is load-imbalanced and
    slow for large p. The asymptotically-better method (next sub-step) is
    `gcd(x^p − x, f) mod p` (O(d² log p), independent of p's magnitude), built from
-   polynomial arithmetic mod f reusing the validated modular inverse.
+   polynomial arithmetic mod f reusing the validated modular inverse — **done, #3.**
+3. **gcd-based root finding** (`bench/gpu-polyselect-roots-gcd.cu`): the
+   asymptotically-better method. Per prime: `h = x^p mod f` by binary
+   exponentiation (polynomial multiply mod f), `g = gcd(h − x, f)` (whose roots are
+   exactly f's roots in F_p), then **Cantor–Zassenhaus** split of g into linear
+   factors (`(x+δ)^((p−1)/2) mod g`, iterated δ). All over F_p with the validated
+   single-word modular arithmetic; `__host__ __device__` so GPU and CPU run
+   identical code. **Validated bit-exact vs direct-eval** (full root multiset):
+   0 mismatch / 0 self-check-bad over 3245 primes (deg 6, p < 30 000). **Key win —
+   p-magnitude-independent:** 5000 primes near **10⁹** in **27.8 ms** (4981 roots,
+   0 self-check-bad), where direct evaluation's O(p) (~10⁹ steps/prime) is
+   hopeless. This is the production root-finder for the full prime range.
 
-Together these prove the per-prime modular arithmetic **and** root finding run
-correctly on the GPU — the building blocks the collision-feed needs.
+Together these prove the per-prime modular arithmetic **and** root finding (both
+small- and large-prime regimes) run correctly on the GPU — the building blocks the
+collision-feed needs.
 
 ## Plan — the GPU polyselect path
 
-1. **Batched per-prime root-finding kernel** (the ~30–40 % target): the
-   direct-evaluation kernel above covers the small-prime regime (done, 6×). The
-   remaining sub-step is the `gcd(x^p − x, f) mod p` method (`x^p mod f` by repeated
-   squaring + polynomial gcd, then Cantor–Zassenhaus root extraction), reusing the
-   validated single-word modinv, for the large-p regime where O(p) is too slow.
-   Bit-exact vs CADO's `modul_poly_roots` over a prime batch.
+1. **Batched per-prime root-finding kernel** (the ~30–40 % target): **done** —
+   direct-eval for the small-prime regime (6×) and the gcd(x^p − x, f) + CZ method
+   for the full range (p-magnitude-independent), both validated bit-exact vs
+   direct-eval. Remaining: validate against CADO's exact `modul_poly_roots` output
+   over a prime batch and wire it as a drop-in for that call.
 2. **Feed the collision search**: stream the GPU `proots` into the existing
    `shash` collision machinery (keep the hash/match on the side that wins — likely
    CPU first, GPU later), so the GPU computes roots while the CPU collides.
