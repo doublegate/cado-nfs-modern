@@ -134,6 +134,22 @@ So even after pinning, **~half the time is the per-call `src`/`dst` transfers** 
 full vector residency is a genuine **~2× opportunity** (~13 Gnz/s → ~7× the full
 CPU). The catch is *what* it takes, established by reading the BWC vector layer:
 
+**Measured residency-win ceiling at scale (real factorizations, `-t 8`, coalesced
+kernel, RTX 3090).** Aggregating the `CADO_GPU_TIMING` split over the *main krylov
+loop* (the highest-count SpMV class, i.e. the steady iterations that dominate):
+
+| N | main-loop SpMV | H2D / kernel / D2H (ms) | transfer share | SpMV speedup if resident |
+|---|---:|---|---:|---:|
+| c70 | 3584 | 0.066 / 0.069 / 0.041 | **61%** | **2.55×** |
+| c80 | 8192 | 0.099 / 0.092 / 0.050 | **62%** | **2.61×** |
+
+The transfer share is **stable-to-rising with N** (per-thread submatrices shrink, so
+the kernel falls while the vector transfers hold), so residency — which removes the
+H2D+D2H of the steady iterations — is a measured **~2.6× on the SpMV hot loop**,
+growing with problem size. (Wall-clock impact on a whole factorization scales with
+linalg's share of the run — small for c70/c80 where sieving dominates, large for
+c100+/DLP where linalg dominates; that large-N/DLP regime is the target.)
+
 - **Every SpMV is bracketed by host-memory work that can't be skipped at the
   backend level.** After each `matmul_top_mul_cpu` (the `mm->mul` seam,
   `matmul_top.cpp:762`) comes `mmt_vec_allreduce` / `matmul_top_mul_comm`
