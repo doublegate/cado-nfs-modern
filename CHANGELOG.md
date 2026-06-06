@@ -70,13 +70,31 @@ Work in progress — see the v3.1.0 roadmap. Landed so far:
   reduce/broadcast** wired into `mmt_vec_allreduce` behind `CADO_GPU_DEVCOMM`.
   `product == N` on the c60 across thread grids `-t 2/4/6/8` and on a c70, in
   default, `DEVCOMM`, and `VECRESIDENT+DEVCOMM` modes; regression-guarded by a new
-  `test_gpu_vecreduce` ctest (GPU builds only). **Honest scope:** this is
-  validated *plumbing*, not yet a transfer saver — it uploads + writes back for
-  correctness, and `allreduce` is the *twist/prep* comm, **not** the per-iteration
-  hot comm (`mmt_vec_reduce`+`mmt_vec_broadcast`). The transfer-eliminating win
-  needs the `reduce`+`broadcast` port plus complete host-write-invalidation /
-  host-read-sync coverage across prep/secure/twist/krylov (scoped in
-  `docs/gpu-linalg.md`).
+  `test_gpu_vecreduce` ctest (GPU builds only).
+- **The per-iteration hot comm on device — the 2D "shuffled-product" transpose.**
+  A 1-matrix factorization's hot comm is `matmul_top_mul_comm` =
+  `mmt_vec_reduce`+`mmt_vec_broadcast`, which reduce-scatters along one grid axis
+  and all-gathers along the perpendicular one (coupling all threads' data) — much
+  harder than the 1D `allreduce` above. `matmul_top_mul_comm_gpu`
+  (`matmul_top_comm.cpp`) runs it on the device-resident buffers by **mirroring
+  the host algorithm op-for-op at identical byte offsets** (so it is bit-for-bit
+  the host comm by construction): five barriered phases per thread over new
+  low-level device-op hooks (`xor_block`/`copy_block`/`upload`/`download`/`ensure`
+  in `matmul-gpu-hooks.h`), with the broadcast collapsing to a no-op for the
+  common `THREAD_SHARED` source vector. `product == N` on the c60 across `-t 4`
+  (2×2 square) and `-t 8` (2×4 rectangular), 10/10 each, in default, `DEVCOMM`,
+  and `VECRESIDENT+DEVCOMM` modes; `compute-sanitizer` memcheck on `prep` reports
+  0 errors. A flaky data-dependent fault found en route (compute-sanitizer):
+  `mul()`'s host-buffer pinning (`cudaHostRegister`) is smaller than the comm's
+  full-vector copies and CUDA enforces the registered region — `g_pin` now skips
+  under `DEVCOMM` (copies go pageable; the default path keeps pinning).
+- **Honest scope of the comm-on-device work so far:** it ports the comm *compute*
+  to the device (validated), **not yet the transfers** — both the allreduce hook
+  and the 2D driver upload + write back for correctness (`current = false`). The
+  transfer-eliminating residency (device-authoritative buffers, skipping the
+  comm's upload/writeback and mul()'s H2D/D2H) needs complete host-write-
+  invalidation / host-read-sync coverage across prep/secure/twist/krylov — the
+  remaining layer, scoped in `docs/gpu-linalg.md`.
 
 ### UI/UX (Track 3.1) — run-status reporting
 

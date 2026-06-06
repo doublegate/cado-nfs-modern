@@ -240,41 +240,50 @@ surgical edit:
   `allreduce` is hit only by the twist and the prep/secure rank checks. So the
   validated hook proves the device-comm *mechanism* end-to-end, but the
   transfer-saving port must target `reduce`+`broadcast`.
-- **Why `reduce`+`broadcast` is fundamentally harder than `allreduce`: it is a 2D
-  transpose, not a 1D reduction.** `mmt_vec_allreduce` reduces a vector across the
-  siblings of **one** communicator (`wr[v.d]`) and every sibling ends equal — a 1D
-  XOR-reduce, which the validated device hook implements directly (and which works
-  on the 2×2 grid: `-t 4` passes). `matmul_top_mul_comm`, by contrast,
-  **reduce-scatters along `w`'s direction `wr[w.d]` and all-gathers along the
-  *perpendicular* direction `wr[v.d]`** (`mmt_vec_reduce_inner` packs into
-  `sibling(0)`; `mmt_vec_broadcast` does the `MPI_Allgather` over `xwrpals` in the
-  other axis). That couples *all* grid threads' data in a transpose-like
-  reorganization — the "shuffled product" the code comments warn is "not the
-  identity". A device port therefore cannot be a per-communicator reduce; it must
-  reproduce the 2D reduce-scatter → repack (with `mmt_my_own_offset_in_items`'s
-  per-`(jrank,trank)` offsets) → all-gather, bit-exactly. The device compute
-  kernels (reduce/broadcast) are in hand and validated; the remaining work is this
-  2D layout/permutation logic on the device buffers — a focused, intricate effort
-  (and the hot path, so a subtle offset bug = silent wrong factorization: it must
-  be built incrementally with the no-trust→trust `product == N` gate).
-- **The win is gated on invalidation/sync coverage that today only covers the
-  krylov main loop.** Marking comm'd device buffers `current` (device
-  authoritative) corrupted **prep/secure** (the rank check looped forever),
-  because those stages overwrite host buffers without an invalidation. The hook
-  is therefore currently *no-trust*: it uploads from host, reduces on device,
-  writes back, and leaves `current = false` — i.e. it is a **correctness checkpoint
-  of the device reduce in the real pipeline, not yet a transfer saver**. The
-  actual residency win (`current = true` + `host_dirty`, skipping H2D/D2H) needs
-  **complete host-write invalidation / host-read `from_device` coverage across
-  prep, secure, twist *and* krylov** — a real audit, not a one-liner.
+- **`reduce`+`broadcast` is a 2D transpose, not a 1D reduction — and it is now
+  ported and validated.** `mmt_vec_allreduce` reduces across the siblings of
+  **one** communicator (`wr[v.d]`) and every sibling ends equal — a 1D XOR-reduce.
+  `matmul_top_mul_comm`, by contrast, **reduce-scatters along `w`'s direction
+  `wr[w.d]` and all-gathers along the *perpendicular* direction `wr[v.d]`**
+  (`mmt_vec_reduce_inner` packs into `sibling(0)`; `mmt_vec_broadcast` all-gathers
+  over `xwrpals` in the other axis) — the "shuffled product" the code comments
+  warn is "not the identity", coupling *all* grid threads' data. Rather than
+  re-derive the transpose, `matmul_top_mul_comm_gpu` (#3, `matmul_top_comm.cpp`)
+  **mirrors the host algorithm op-for-op at identical byte offsets** on the device
+  copies, so the result is bit-for-bit the host comm's by construction: five
+  barriered phases per thread (upload `w`; `reduce_inner` XOR via `xor_block`;
+  `mmt_vec_reduce` repack via device copy at `mmt_my_own_offset_in_items`; the
+  `mmt_vec_broadcast` `own_vec_set2`+`full_vec_set` copies — collapsing to a no-op
+  for the common `THREAD_SHARED` source vector; download `v`). Gated on
+  `CADO_GPU_DEVCOMM`, single-node only. **Validated `product == N` on the c60
+  across `-t 4` (2×2 square) and `-t 8` (2×4 rectangular), 10/10 each, in default,
+  `DEVCOMM`, and `VECRESIDENT+DEVCOMM` modes; `compute-sanitizer` memcheck on
+  `prep` reports 0 errors.**
+  - *Bug found and fixed in the process* (compute-sanitizer): `mul()` pins host
+    buffers (`cudaHostRegister`) at *its* size, but the comm copies the full
+    vector (larger); CUDA enforces the registered region size, which corrupts the
+    context (a flaky "invalid argument" / "Copy larger than memobj size"). Pinning
+    is a transfer-speed optimisation that residency makes moot, so `g_pin` now
+    skips when `DEVCOMM` is active (copies go pageable — correct; the default path
+    keeps pinning and its measured speedup).
+- **Still NO-TRUST: this ports the comm *compute* to the device, not yet the
+  *transfers*.** The driver uploads `w` from host, computes on device, and writes
+  `v` back (`current = false`) — a correctness checkpoint of the device transpose
+  in the real pipeline. The transfer-eliminating residency (`current = true` +
+  `host_dirty`, skipping the comm's upload/writeback **and** mul()'s H2D/D2H) is
+  the remaining layer, and it is gated on **complete host-write invalidation /
+  host-read `from_device` coverage across prep, secure, twist *and* krylov** —
+  marking comm'd buffers device-authoritative corrupted prep/secure earlier
+  (those stages overwrite host buffers without an invalidation). That audit, plus
+  flipping the comm + mul to device-authoritative, is the next step.
 
-So the steady-state inner loop running entirely on device buffers (H2D/D2H gone)
-remains the goal; the registry (1) and the hook ABI + bit-exact device reduce (2)
-are the validated foundation, and the remaining work is the `reduce`+`broadcast`
-port plus the invalidation/sync audit, each correctness-gated by a full verified
-factorization in default *and* resident modes.
+So the device-comm *mechanism* for the hot path is done and correctness-gated; the
+steady-state inner loop running entirely on device buffers (H2D/D2H gone) is the
+remaining residency layer (the invalidation/sync audit), each step gated by a full
+verified factorization in default *and* resident modes.
 
-Until then, the backend captures the bounded win (pinning) and is bit-exact.
+Until then, the backend captures the bounded win (pinning, default path) and is
+bit-exact.
 
 ## Kernel tuning — done (coalesced warp-per-row)
 
