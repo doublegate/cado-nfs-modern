@@ -16,6 +16,23 @@ From 3.1.0-modern the fork carries its own minor line (still upstream 3.0.0's NF
 algorithms; the bump reflects substantial original work beyond a pure mirror).
 Work in progress — see the v3.1.0 roadmap. Landed so far:
 
+### GPU (Track 2.2) — linear-algebra SpMV (foundation)
+
+- **Bit-exact GF(2) SpMV on the GPU** (`bench/gpu-spmv-bench.cu`), the kernel
+  Block Wiedemann (`linalg/bwc`) runs thousands of times and the
+  fastest-growing NFS phase (~110× c60→c90). Mirrors `matmul-basic` exactly
+  (`dst[i] = XOR_{j in row i} src[j]`, bitsliced K-limb blocks b64/b128/b256);
+  validated bit-exact vs the CPU loop (0 wrong words). With the matrix resident
+  on the device (as BWC reuses it), on an RTX 3090 vs a 20-thread i9-10850K it
+  reaches **6–15× the *naive* CPU SpMV** (7.9 Gnz/s b64, 5.1 b128).
+  **Honest caveat:** the CPU baseline is `matmul-basic`, *not* CADO's tuned
+  `bucket` backend (which is faster), and the kernel is un-tuned (uncoalesced
+  `src` gather, ~10% of peak bandwidth) — so this is an upper bound on the
+  production win; benchmarking vs `bucket` on a real matrix and building the
+  `matmul_bNN_gpu` backend (resident matrix, multi-GPU via the existing MPI
+  balancing) are the next increments. Full design + caveats:
+  `docs/gpu-linalg.md`.
+
 ### UI/UX (Track 3.1) — run-status reporting
 
 - **`--json-status FILE`** writes a machine-readable status snapshot (schema
