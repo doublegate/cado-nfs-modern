@@ -102,19 +102,23 @@ gathers), and copies only the `src`/`dst` vectors per call.
 - **Bit-exact:** passes `bench_matcache`'s consistency check
   (`(M·v₁)·v₂ == (Mᵀ·v₂)·v₁`) — **all 4 checks pass** for both directions on the
   real 1M×1M matrix.
-- **Measured (real backend, incl. per-call vector transfers):** **4.95 Gnz/s** on
-  the RTX 3090 — **~8× a single `bucket` thread** and **~2.7× the full-CPU
-  `bucket`** (1.8 Gnz/s). That is *with* the naive per-iteration H2D/D2H copy of
-  `src`/`dst` (~16 MB/iter over PCIe), which is now the bottleneck — the
-  kernel-only ceiling is ~4.4× (above). **Keeping the BWC vectors resident on the
-  device across iterations** (only exchanging across MPI) is the next perf step,
-  toward that ceiling.
+- **Measured (real backend, incl. per-call vector transfers):** BWC reuses the
+  same host vector buffers every iteration, so the backend **page-locks (pins)
+  each one the first time it sees it** — all subsequent H2D/D2H transfers then run
+  at full PCIe bandwidth. That lifted it from 4.95 → **6.76 Gnz/s** on the RTX
+  3090 — **~11× a single `bucket` thread** and **~3.75× the full-CPU `bucket`**
+  (1.8 Gnz/s). The residual ~1 ms/iter is the unavoidable `src`+`dst` (~16 MB)
+  still crossing PCIe each call; only **full vector residency** (vectors never
+  leaving the GPU, exchanged only across MPI — an `mmt_vec`-layer change above the
+  backend) removes it, toward the ~7.9 Gnz/s kernel-only ceiling.
 
 ## Next increments
 
-1. **Device-resident vectors**: hold the `mmt_vec` data on the GPU across the
-   thousands of SpMV iterations (copy out only for the MPI exchange), removing the
-   per-call transfers — the main remaining single-machine win.
+1. **Pinned host transfers — done.** The backend pins each reused BWC vector once,
+   so transfers run at full PCIe speed (4.95 → 6.76 Gnz/s). The remaining win
+   needs **full vector residency** (hold the `mmt_vec` data on the GPU across all
+   iterations, copy out only for the MPI exchange) — an `mmt_vec`-layer change
+   above the backend, removing the last ~1 ms/iter.
 2. **Kernel tuning**: coalesced/ELL layout, column sorting, shared-memory `src`
    caching (the kernel realizes only ~10% of peak bandwidth today).
 3. **Multi-GPU / multi-node**: BWC already splits the matrix across an `nh×nv`
@@ -132,8 +136,8 @@ gathers), and copies only the `src`/`dst` vectors per call.
     bandwidth-bound), so the kernel-only GPU win is ~4.4×;
   - **a real `matmul_bNN_gpu` backend** (`linalg/bwc/matmul-gpu.cu`) plugged into
     BWC's dispatch (`mm_impl=gpu`), passing `bench_matcache`'s bit-exact check
-    (4/4, both directions) and running at **4.95 Gnz/s incl. transfers (~2.7× the
-    full-CPU `bucket`)**.
-- **Next:** device-resident vectors (kill the per-call transfers → toward the
-  ~4.4× ceiling), kernel tuning, then multi-GPU/MPI wiring where the GPU's
-  aggregate-bandwidth advantage at scale lives.
+    (4/4, both directions), with **pinned host-vector transfers** — **6.76 Gnz/s,
+    ~3.75× the full-CPU `bucket`**.
+- **Next:** full vector residency (eliminate the residual per-call transfer →
+  toward the ~7.9 Gnz/s kernel ceiling), kernel tuning, then multi-GPU/MPI wiring
+  where the GPU's aggregate-bandwidth advantage at scale lives.

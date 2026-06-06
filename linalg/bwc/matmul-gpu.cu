@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <vector>
 #include <utility>
+#include <map>
 
 #include <cuda_runtime.h>
 
@@ -90,6 +91,26 @@ struct matmul_gpu : public matmul_interface {
     unsigned int nrows_dir[2] = { 0, 0 };
     uint64_t * d_src = nullptr; size_t cap_src = 0;
     uint64_t * d_dst = nullptr; size_t cap_dst = 0;
+
+    /* BWC reuses the same host vector buffers across the thousands of SpMV
+     * iterations, so we page-lock (pin) each one the first time we see it ->
+     * every H2D/D2H transfer then runs at full PCIe bandwidth instead of the
+     * staged pageable path. (Full device residency -- vectors never leaving the
+     * GPU -- would need changes in the mmt_vec layer above; this is the safe,
+     * contained win at the backend level.) */
+    std::map<const void *, size_t> pinned;
+    void ensure_pinned(const void * p, size_t bytes) {
+        auto it = pinned.find(p);
+        if (it != pinned.end()) {
+            if (bytes <= it->second) return;          /* already pinned big enough */
+            cudaHostUnregister((void *) p);           /* grow the registration */
+            pinned.erase(it);
+        }
+        if (cudaHostRegister((void *) p, bytes, cudaHostRegisterDefault) == cudaSuccess)
+            pinned[p] = bytes;
+        else
+            cudaGetLastError();                       /* not pinnable -> pageable, still correct */
+    }
 
     void build_cache(matrix_u32 &&) override;
     int reload_cache_private() override;
@@ -193,6 +214,8 @@ void matmul_gpu<Arith>::mul(void * xdst, void const * xsrc, int d)
     if (cap_src < srcbytes) { if (d_src) cudaFree(d_src); CUCHECK(cudaMalloc(&d_src, srcbytes)); cap_src = srcbytes; }
     if (cap_dst < dstbytes) { if (d_dst) cudaFree(d_dst); CUCHECK(cudaMalloc(&d_dst, dstbytes)); cap_dst = dstbytes; }
 
+    ensure_pinned(xsrc, srcbytes);
+    ensure_pinned(xdst, dstbytes);
     CUCHECK(cudaMemcpy(d_src, xsrc, srcbytes, cudaMemcpyHostToDevice));
     launch_spmv(K, d_rp[dir], d_col[dir], d_src, d_dst, nrows);
     CUCHECK(cudaGetLastError());
@@ -207,6 +230,7 @@ matmul_gpu<Arith>::~matmul_gpu()
     for (int i = 0; i < 2; i++) { if (d_rp[i]) cudaFree(d_rp[i]); if (d_col[i]) cudaFree(d_col[i]); }
     if (d_src) cudaFree(d_src);
     if (d_dst) cudaFree(d_dst);
+    for (auto const & kv : pinned) cudaHostUnregister((void *) kv.first);
 }
 
 // NOLINTNEXTLINE(misc-use-internal-linkage)
