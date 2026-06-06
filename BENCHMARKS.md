@@ -174,3 +174,57 @@ nvcc -arch=sm_86 -O3 -Xcompiler -pthread bench/gpu-prefactor-bench.cu -lgmp -o g
 
 _Measured 2026-06-05 on the RTX 3090 + i9-10850K. The pre-factoring ECM math is
 validated bit-exact (`bench/gpu-ecm-mp.cu`)._
+
+## GPU linear algebra (BWC SpMV) at scale (v3.1.0-modern, Track 2.2)
+
+The GPU GF(2) SpMV backend (`mm_impl=gpu`, `linalg/bwc/matmul-gpu.cu`) is the
+kernel Block Wiedemann runs thousands of times, and the fastest-growing NFS phase
+(linalg ~110× c60→c90). The thesis of this fork's GPU-linalg work is that the win
+**grows with N** — so the headline is a scaling sweep, not a single point.
+
+**Scaling sweep** (`bench/gpu-spmv-bench.cu`, b64 = 64 vectors, ~30 nnz/row,
+bit-exact warp kernel `PASS` at every size; RTX 3090 vs the i9-10850K). Rows are
+representative of c100–c120 linalg matrices:
+
+| ~size | rows | nnz | GPU warp (Gnz/s) | CPU ref loop, 20 thr (Gnz/s) | GPU vs ref loop |
+|---|---:|---:|---:|---:|---:|
+| c100 | 1.0 M | 30 M | 28.9 | 1.58 | 18× |
+| c110 | 2.0 M | 60 M | 12.3 | 0.76 | 16× |
+| c115 | 4.0 M | 120 M | 9.2 | 0.24 | 38× |
+| c120 | 8.0 M | 240 M | 7.9 | 0.19 | **41×** |
+
+**Honest reading.** Two effects compound. (1) The GPU's absolute throughput
+*falls* as the matrix grows (28.9→7.9 Gnz/s) — at 1 M rows it largely fits cache;
+at 8 M rows / 240 M nnz it is memory-latency-bound on uncoalesced `src[col]`
+gathers off random CSR. (2) The CPU reference loop falls *much faster*
+(1.58→0.19 Gnz/s) because random-CSR SpMV thrashes cache once the matrix exceeds
+LLC. So the GPU's **relative** advantage widens with N — the central claim. The
+CPU column here is the threaded reference loop; against CADO's *tuned* `bucket`
+backend (which reorders columns for locality and **saturates at ~1.8 Gnz/s** on
+this CPU, measured separately in `docs/gpu-linalg.md`), the GPU warp kernel at
+c120-scale is a **steadier ~4.4×** — a real single-machine win, and a floor (the
+kernel realises only a fraction of the 3090's ~936 GB/s; the biggest gains are at
+aggregate multi-GPU/multi-node bandwidth and out-of-core matrices).
+
+**End-to-end anchor (real factorization, `product == N`).** A 90-digit GNFS run
+with `tasks.linalg.bwc.mm_impl=gpu` + full vector residency
+(`CADO_GPU_VECRESIDENT=1 CADO_GPU_DEVCOMM=1`, `-t 8`) drove the whole BWC pipeline
+(krylov → lingen → mksol → gather) through the GPU backend and returned the
+correct factors. At c90 the matrix is small — bwc total **8.18 s real** (krylov
+2.65 s / 2300 iters, lingen 2.14 s, mksol 1.72 s) out of a ~349 s factorization
+(sieving-dominated) — so GPU vs CPU linalg is immaterial *at this size*; the point
+of the anchor is end-to-end correctness of the GPU path, and the sweep above is
+where the size-driven win lives. (A standalone c59 GPU run also returns
+`product == N`, used as the fast residency regression.)
+
+```bash
+# GPU SpMV scaling sweep (needs CUDA; matrices are synthetic, generated in-process)
+nvcc -arch=sm_86 -O3 -Xcompiler -pthread bench/gpu-spmv-bench.cu -o gpu-spmv-bench
+./gpu-spmv-bench
+# real end-to-end GPU linalg (needs -DENABLE_GPU=ON build)
+CADO_GPU_VECRESIDENT=1 CADO_GPU_DEVCOMM=1 \
+  cado-nfs.venv/bin/python3 ./cado-nfs.py <c90> tasks.linalg.bwc.mm_impl=gpu -t 8
+```
+
+_Measured 2026-06-06 on the RTX 3090 + i9-10850K (CUDA 13.3, sm_86). SpMV kernel
+bit-exact vs the CPU reference at every size; end-to-end `product == N`._

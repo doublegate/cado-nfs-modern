@@ -319,7 +319,11 @@ target_link_libraries(bwc_base utils ${pthread_libs} bwc_arith)
 # shared, as embarking the code within the impl-specific .so is fine.
 # Unfortunately, we do want matmul_common to be compiled with -fPIC,
 # then. Which is easiest to trigger by making it a shared object.
-mpi_add_library(matmul_common ${CADO_SHARED} matmul-common.cpp)
+# matmul-gpu-hooks.cpp defines the cado_gpu_* comm-on-device hook pointers
+# (Track 2.2) here, in the dependency-free leaf, so both bwc_base (which calls
+# them) and the GPU backend (which installs them) resolve them without a circular
+# static-link dependency. CUDA-free: null pointers in CPU-only builds.
+mpi_add_library(matmul_common ${CADO_SHARED} matmul-common.cpp matmul-gpu-hooks.cpp)
 target_link_libraries(matmul_common utils)
 if(ENABLE_SHARED)
     install(TARGETS matmul_common DESTINATION ${LIBSUFFIX}/linalg/bwc)

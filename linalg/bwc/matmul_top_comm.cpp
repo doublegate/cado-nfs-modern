@@ -18,24 +18,10 @@
 #include "timing.h"
 #include "verbose.hpp"
 
-/* GPU comm-on-device hooks (Track 2.2). Null unless a GPU matmul backend is
- * loaded and installs them in its constructor; null => ordinary host comm. */
-int (*cado_gpu_comm_reduce_bcast)(void * const *, unsigned int, size_t) = nullptr;
-int (*cado_gpu_sync_to_host)(void const *) = nullptr;
-int (*cado_gpu_dev_xor_block)(void *, void * const *, unsigned int, size_t, size_t, size_t) = nullptr;
-int (*cado_gpu_dev_copy_block)(void *, size_t, void const *, size_t, size_t, size_t, size_t) = nullptr;
-int (*cado_gpu_dev_upload)(void const *, size_t) = nullptr;
-int (*cado_gpu_dev_download)(void *, size_t) = nullptr;
-int (*cado_gpu_dev_sync)(void) = nullptr;
-int (*cado_gpu_dev_ensure)(void const *, size_t) = nullptr;
-int cado_gpu_residency_active = 0;
-int cado_gpu_residency_available = 0;
-int (*cado_gpu_dev_mark_resident)(void const *, size_t) = nullptr;
-int (*cado_gpu_x_dotprod)(void *, uint32_t const *, unsigned int, unsigned int,
-                          unsigned int, void const *, size_t, unsigned int,
-                          unsigned int, unsigned int, int) = nullptr;
-int (*cado_gpu_addmul_tiny)(void *, void const *, void const *, unsigned int,
-                            unsigned int, unsigned int, size_t, size_t, size_t) = nullptr;
+/* GPU comm-on-device hooks (Track 2.2) are DEFINED in matmul-gpu-hooks.cpp
+ * (compiled into matmul_common, the dependency-free leaf both bwc_base and the
+ * GPU backend link) to avoid a circular static-link dependency; here we only
+ * call through them. Null => no GPU backend loaded => ordinary host comm. */
 
 /* Our innermost communication routines are essentially all-gather and
  * reduce-scatter, following the MPI terminology. We provide several

@@ -153,6 +153,25 @@ Work in progress — see the v3.1.0 roadmap. Landed so far:
   so a later `sync_to_host` cannot D2H stale device data over it. `product == N`:
   single-rank resident `-t 4/8` PASS, `mpi=1x2`/`2x1` resident (disabled) PASS,
   default/`DEVCOMM`/resident 12/12 PASS; compute-sanitizer clean.
+- **Build fix — GPU backend links into standalone matmul tools.** The
+  `cado_gpu_*` comm-on-device hook pointers were *defined* in `bwc_base`
+  (`matmul_top_comm.cpp`), which the GPU matmul backend references but
+  `bench_matcache` does not fully pull in — a circular static-link dependency left
+  the symbols unresolved (`bench_matcache --impl gpu` failed to link). The
+  definitions moved to a new dependency-free leaf TU `matmul-gpu-hooks.cpp`
+  compiled into `matmul_common` (the leaf every backend already links), so both
+  `bwc_base` (which calls the hooks) and the GPU backend (which installs them)
+  resolve them with no cycle and no CUDA dependency in CPU-only builds. Behaviour
+  is byte-identical (null pointers ⇒ host comm). Re-validated end-to-end after a
+  full relink: c59 GPU `product == N`.
+- **GPU linalg at scale — measured (Track 2.2 headline).** A scaling sweep
+  (`bench/gpu-spmv-bench.cu`, b64, bit-exact at every size) shows the GPU SpMV
+  win **grows with N**: GPU warp kernel 28.9→7.9 Gnz/s as the matrix grows
+  1M→8M rows (240M nnz, c100→c120 scale), while the CPU reference loop collapses
+  1.58→0.19 Gnz/s (random-CSR cache thrash) — 18×→41× over the reference loop, a
+  steadier ~4.4× over the tuned `bucket`'s saturated ~1.8 Gnz/s. End-to-end anchor:
+  a 90-digit GNFS with `mm_impl=gpu` + residency returns `product == N` (bwc 8.18s
+  real — small at c90, sieving-dominated). Recorded in `BENCHMARKS.md`.
 
 ### UI/UX (Track 3.1) — run-status reporting
 
