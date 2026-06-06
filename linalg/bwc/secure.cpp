@@ -18,6 +18,7 @@
 #include "bw-common.hpp"
 #include "macros.h"
 #include "matmul_top.hpp"
+#include "matmul-gpu-hooks.h"   // GPU addmul / residency for secure (Track 2.2)
 #include "matmul_top_comm.hpp"
 #include "matmul_top_vec.hpp"
 #include "arith-generic.hpp"
@@ -80,6 +81,16 @@ static void * sec_prog(parallelizing_info_ptr pi, cxx_param_list & pl, void * ar
     mmt_vec & my = myy[0];
 
     mmt_vec dvec(mmt, nullptr, nullptr, !bw->dir, /* shared ! */ 1, mmt.n[!bw->dir]);
+
+    /* GPU residency for secure (Track 2.2): same shape as mksol — accumulate the
+     * check vector dvec from the matmul'd vector my on the device, keeping both
+     * device-resident across the loop (dvec is shared, so its broadcast is a
+     * no-op). GF(2) only. */
+    int const char2_s = mpz_cmp_ui(bw->p, 2) == 0;
+    unsigned int const Kc = char2_s ? (A->simd_groupsize() / 64) : 0;
+    unsigned int const Lc = char2_s ? (A->simd_groupsize() / 64) : 0;
+    bool const secure_residency_ok = cado_gpu_residency_available
+        && cado_gpu_addmul_tiny != nullptr && char2_s && mmt_vec_is_shared(dvec);
 
     unsigned int const unpadded = MAX(mmt.n0[0], mmt.n0[1]);
 
@@ -349,11 +360,30 @@ static void * sec_prog(parallelizing_info_ptr pi, cxx_param_list & pl, void * ar
             pi_bcast(Rdata_stream, nchecks * (next - k0), A_pi, 0, 0, pi->m);
         }
     
+        /* GPU residency: seed the matmul vector (my) and the accumulator (dvec)
+         * on the device and activate residency for the loop. */
+        if (secure_residency_ok) {
+            size_t const w_buf = (size_t)(dvec.i1 - dvec.i0) * A->vec_elt_stride(1);
+            size_t const u_buf = (size_t)(my.i1 - my.i0) * A->vec_elt_stride(1);
+            cado_gpu_dev_upload(my.v, u_buf);
+            cado_gpu_dev_upload(dvec.v, w_buf);
+            cado_gpu_residency_active = 1;
+        }
+
         for( ; k < next ; k++) {
             /* new random coefficient in R */
             arith_generic::elt * Rdata = A->vec_subvec(Rdata_stream, (k-k0) * nchecks);
             /* At this point Rdata should be consistent across all
              * threads */
+            bool addmul_done = false;
+            if (secure_residency_ok && cado_gpu_residency_active) {
+                size_t const w_buf = (size_t)(dvec.i1 - dvec.i0) * A->vec_elt_stride(1);
+                size_t const u_buf = (size_t)(my.i1 - my.i0) * A->vec_elt_stride(1);
+                addmul_done = cado_gpu_addmul_tiny(dvec.v, my.v, Rdata,
+                        (unsigned) mmt_my_own_size_in_items(my), Kc, Lc,
+                        mmt_my_own_offset_in_items(dvec), w_buf, u_buf);
+            }
+            if (!addmul_done)
             AxA->addmul_tiny(
                     mmt_my_own_subvec(dvec),
                     mmt_my_own_subvec(my),
@@ -368,6 +398,14 @@ static void * sec_prog(parallelizing_info_ptr pi, cxx_param_list & pl, void * ar
             if (tcan_print) {
                 putchar('.');
                 fflush(stdout);
+            }
+        }
+        /* Leave residency: materialise both vectors for untwist + save. */
+        if (secure_residency_ok) {
+            cado_gpu_residency_active = 0;
+            if (cado_gpu_sync_to_host) {
+                cado_gpu_sync_to_host(my.v);
+                cado_gpu_sync_to_host(dvec.v);
             }
         }
         serialize(pi->m);
