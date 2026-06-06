@@ -63,14 +63,43 @@ __global__ void spmv_gather(const uint32_t * rowptr, const uint32_t * col,
     for (int k = 0; k < K; k++) d[k] = acc[k];
 }
 
+/* coalesced variant: one warp per output row. Lanes stride the row's nonzeros
+ * (col[] reads coalesce), src is gathered through the read-only cache (__ldg),
+ * then the K-limb accumulator is warp-reduced. Bit-exact with spmv_gather; ~1.8-3x
+ * faster (validated in bench/gpu-spmv-bench.cu). */
+template<int K>
+__global__ void spmv_warp(const uint32_t * rowptr, const uint32_t * col,
+                          const uint64_t * src, uint64_t * dst, unsigned int nrows)
+{
+    unsigned int gid = blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned int row = gid >> 5, lane = gid & 31;
+    if (row >= nrows) return;
+    uint64_t acc[K];
+#pragma unroll
+    for (int k = 0; k < K; k++) acc[k] = 0;
+    uint32_t lo = rowptr[row], hi = rowptr[row + 1];
+    for (uint32_t p = lo + lane; p < hi; p += 32) {
+        const uint64_t * s = src + (size_t) __ldg(&col[p]) * K;
+#pragma unroll
+        for (int k = 0; k < K; k++) acc[k] ^= __ldg(&s[k]);
+    }
+#pragma unroll
+    for (int off = 16; off > 0; off >>= 1)
+#pragma unroll
+        for (int k = 0; k < K; k++) acc[k] ^= __shfl_down_sync(0xffffffffu, acc[k], off);
+    if (lane == 0) { uint64_t * d = dst + (size_t) row * K;
+#pragma unroll
+        for (int k = 0; k < K; k++) d[k] = acc[k]; }
+}
+
 static void launch_spmv(int K, const uint32_t * rp, const uint32_t * col,
                         const uint64_t * src, uint64_t * dst, unsigned int nrows)
 {
-    int tpb = 128, blk = (int)((nrows + tpb - 1) / tpb);
+    int tpb = 128; int blk = (int)(((size_t) nrows * 32 + tpb - 1) / tpb);
     switch (K) {
-        case 1: spmv_gather<1><<<blk, tpb>>>(rp, col, src, dst, nrows); break;
-        case 2: spmv_gather<2><<<blk, tpb>>>(rp, col, src, dst, nrows); break;
-        case 4: spmv_gather<4><<<blk, tpb>>>(rp, col, src, dst, nrows); break;
+        case 1: spmv_warp<1><<<blk, tpb>>>(rp, col, src, dst, nrows); break;
+        case 2: spmv_warp<2><<<blk, tpb>>>(rp, col, src, dst, nrows); break;
+        case 4: spmv_warp<4><<<blk, tpb>>>(rp, col, src, dst, nrows); break;
         default:
             fprintf(stderr, "matmul-gpu: unsupported block width K=%d\n", K);
             abort();

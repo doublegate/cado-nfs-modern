@@ -156,12 +156,21 @@ single increment. The honest sequence:
 Each step is correctness-gated by a full verified factorization. Until then, the
 backend captures the bounded win (pinning) and is bit-exact.
 
-## Kernel tuning (the other ~52%)
+## Kernel tuning — done (coalesced warp-per-row)
 
-Independent of residency: the one-thread-per-row kernel realizes only ~10% of the
-3090's bandwidth (uncoalesced `src[col]` gather). Coalesced/ELL layout, column
-sorting for reuse, and shared-memory `src` caching are safe, contained wins that
-attack the 52% kernel share directly.
+The one-thread-per-row kernel was uncoalesced. A **warp-per-row** kernel — lanes
+stride the row's nonzeros (so `col[]` reads coalesce), `src` gathered through the
+read-only cache (`__ldg`), then the K-limb accumulator warp-reduced — is
+**bit-exact** (validated in `bench/gpu-spmv-bench.cu`: warp PASS, 0 words; and the
+backend still passes `bench_matcache` 4/4) and **1.8–3.1× faster** standalone
+(b64 6.9→12.6 Gnz/s, b256 3.9→12.3). In the backend it cut the kernel from
+2.63 → **0.97 ms** (2.7×), lifting the end-to-end SpMV to **8.96 Gnz/s (~5× the
+full-CPU `bucket`)**.
+
+Crucially this **flips the bottleneck**: the split is now H2D 1.81 ms / kernel
+0.97 ms / D2H 0.62 ms — **72% transfers**. So the residency port above is now the
+clearly dominant remaining single-machine win (~3× more headroom), and further
+kernel tuning (ELL, column sorting, shared-mem `src`) is secondary.
 3. **Multi-GPU / multi-node**: BWC already splits the matrix across an `nh×nv`
    MPI grid (`balancing_workhorse`), each rank owning a submatrix; the GPU backend
    slots in at each rank's local `mm->mul()`. One GPU per rank → multi-GPU on a
@@ -177,8 +186,9 @@ attack the 52% kernel share directly.
     bandwidth-bound), so the kernel-only GPU win is ~4.4×;
   - **a real `matmul_bNN_gpu` backend** (`linalg/bwc/matmul-gpu.cu`) plugged into
     BWC's dispatch (`mm_impl=gpu`), passing `bench_matcache`'s bit-exact check
-    (4/4, both directions), with **pinned host-vector transfers** — **6.76 Gnz/s,
-    ~3.75× the full-CPU `bucket`**.
-- **Next:** full vector residency (eliminate the residual per-call transfer →
-  toward the ~7.9 Gnz/s kernel ceiling), kernel tuning, then multi-GPU/MPI wiring
-  where the GPU's aggregate-bandwidth advantage at scale lives.
+    (4/4, both directions), with **pinned host-vector transfers** and a
+    **coalesced warp-per-row kernel** — **8.96 Gnz/s, ~5× the full-CPU `bucket`**
+    (kernel cut 2.7×; the split is now 72% transfers / 28% kernel).
+- **Next:** full vector residency (the now-dominant 72% transfer share — a
+  multi-step vector-layer port, scoped above), then multi-GPU/MPI wiring where the
+  GPU's aggregate-bandwidth advantage at scale lives.

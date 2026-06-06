@@ -47,6 +47,33 @@ __global__ void spmv(const u32* rowptr, const u32* col, const u64* src,
     for(int k=0;k<K;k++) d[k]=acc[k];
 }
 
+/* Coalesced variant: one warp per row. Lanes stride the row's nonzeros (so the
+ * col[] reads coalesce), gather src via the read-only cache (__ldg), then
+ * warp-reduce the K-limb accumulator. Same GF(2) result as spmv(). */
+template<int K>
+__global__ void spmv_warp(const u32* rowptr, const u32* col, const u64* src,
+                          u64* dst, int nrows){
+    int gid = blockIdx.x*blockDim.x + threadIdx.x;
+    int row = gid >> 5, lane = gid & 31;
+    if(row>=nrows) return;
+    u64 acc[K];
+    #pragma unroll
+    for(int k=0;k<K;k++) acc[k]=0;
+    u32 lo=rowptr[row], hi=rowptr[row+1];
+    for(u32 p=lo+lane; p<hi; p+=32){
+        const u64* s = src + (size_t)__ldg(&col[p])*K;
+        #pragma unroll
+        for(int k=0;k<K;k++) acc[k]^=__ldg(&s[k]);
+    }
+    #pragma unroll
+    for(int off=16; off>0; off>>=1)
+        #pragma unroll
+        for(int k=0;k<K;k++) acc[k]^=__shfl_down_sync(0xffffffffu, acc[k], off);
+    if(lane==0){ u64* d=dst+(size_t)row*K;
+        #pragma unroll
+        for(int k=0;k<K;k++) d[k]=acc[k]; }
+}
+
 /* CPU reference (also used multi-threaded for the throughput comparison) */
 template<int K>
 static void cpu_spmv(const u32* rowptr, const u32* col, const u64* src,
@@ -93,6 +120,19 @@ static int run(const char* label, int n, int avg_nnz, int iters){
     cudaError_t e=cudaGetLastError();
     cudaMemcpy(dst_g.data(),ddst,dst_g.size()*8,cudaMemcpyDeviceToHost);
     double gsec=std::chrono::duration<double>(g1-g0).count()/iters;
+
+    /* coalesced warp-per-row variant: validate bit-exact vs the scalar kernel + time */
+    std::vector<u64> dst_w((size_t)n*K);
+    int wtpb=128, wblk=(int)(((size_t)n*32 + wtpb-1)/wtpb);
+    spmv_warp<K><<<wblk,wtpb>>>(drp,dcol,dsrc,ddst,n); cudaDeviceSynchronize();
+    auto w0=std::chrono::steady_clock::now();
+    for(int it=0;it<iters;it++) spmv_warp<K><<<wblk,wtpb>>>(drp,dcol,dsrc,ddst,n);
+    cudaDeviceSynchronize();
+    auto w1=std::chrono::steady_clock::now();
+    cudaMemcpy(dst_w.data(),ddst,dst_w.size()*8,cudaMemcpyDeviceToHost);
+    double wsec=std::chrono::duration<double>(w1-w0).count()/iters;
+    long wmis=0; for(size_t i=0;i<dst_g.size();i++) if(dst_g[i]!=dst_w[i]) wmis++;
+
     cudaFree(drp);cudaFree(dcol);cudaFree(dsrc);cudaFree(ddst);
 
     /* ---- CPU reference (single thread) for bit-exact validation ---- */
@@ -113,12 +153,12 @@ static int run(const char* label, int n, int avg_nnz, int iters){
     auto c1=std::chrono::steady_clock::now();
     double csec=std::chrono::duration<double>(c1-c0).count()/iters;
 
-    double gnz_g=nnz/gsec/1e9, gnz_c=nnz/csec/1e9;
-    printf("  [%s] n=%d nnz=%zu (avg %d/row): validation %s (%ld/%zu words)\n",
-           label, n, nnz, avg_nnz, mis==0?"PASS":"FAIL", mis, dst_c.size());
-    printf("        GPU %6.2f Gnz/s (%.2f ms) | CPU(%2d thr) %5.2f Gnz/s (%.2f ms) | speedup %4.1fx%s\n",
-           gnz_g, gsec*1e3, nthr, gnz_c, csec*1e3, gnz_c>0?gnz_g/gnz_c:0, e?"  CUDAERR":"");
-    return mis!=0;
+    double gnz_g=nnz/gsec/1e9, gnz_w=nnz/wsec/1e9, gnz_c=nnz/csec/1e9;
+    printf("  [%s] n=%d nnz=%zu (avg %d/row): scalar %s, warp %s (%ld words)\n",
+           label, n, nnz, avg_nnz, mis==0?"PASS":"FAIL", wmis==0?"PASS":"FAIL", wmis);
+    printf("        GPU scalar %6.2f Gnz/s | GPU warp(coalesced) %6.2f Gnz/s (%.2fx) | CPU(%2d thr) %5.2f Gnz/s%s\n",
+           gnz_g, gnz_w, gnz_g>0?gnz_w/gnz_g:0, nthr, gnz_c, e?"  CUDAERR":"");
+    return (mis!=0)||(wmis!=0);
 }
 
 int main(){

@@ -47,9 +47,15 @@ Work in progress — see the v3.1.0 roadmap. Landed so far:
   vector once** (page-locked memory), so all H2D/D2H transfers run at full PCIe
   speed: **6.76 Gnz/s** (up from 4.95 pageable) — **~11× a single `bucket`
   thread, ~3.75× the full-CPU `bucket`** (1.8 Gnz/s). The residual ~1 ms/iter is
-  `src`+`dst` still crossing PCIe; full vector residency (an `mmt_vec`-layer
-  change), kernel tuning, and multi-GPU/MPI are the next steps toward the
-  ~7.9 Gnz/s kernel ceiling.
+  `src`+`dst` still crossing PCIe.
+- **Coalesced warp-per-row kernel** (`bench/gpu-spmv-bench.cu` + the backend): lanes
+  stride the row's nonzeros (coalesced `col[]`), `src` gathered via `__ldg`,
+  K-limb accumulator warp-reduced. Bit-exact (warp PASS / `bench_matcache` 4/4)
+  and **1.8–3.1× faster** standalone; in the backend it cut the kernel
+  2.63→0.97 ms, lifting end-to-end SpMV to **8.96 Gnz/s — ~5× the full-CPU
+  `bucket`**. This flips the bottleneck to **72% transfers / 28% kernel**, so full
+  vector residency (the scoped multi-step vector-layer port in
+  `docs/gpu-linalg.md`) is now the dominant remaining single-machine win.
 
 ### UI/UX (Track 3.1) — run-status reporting
 
