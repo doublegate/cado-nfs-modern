@@ -1310,6 +1310,18 @@ class Cado_NFS_toplevel(object):
             help="Turn off colored output",
             action='store_true')
         parser.add_argument(
+            "--json-status",
+            help="Write a machine-readable run-status snapshot (phase, "
+                 "percent, ETA, work-unit counts, factors) to this file, "
+                 "rewritten atomically as the computation progresses.",
+            action='store')
+        parser.add_argument(
+            "--progress",
+            help="Show a compact single-line progress indicator (phase, "
+                 "percent, ETA) on stderr. Pair with --screenlog WARNING for "
+                 "a clean line.",
+            action='store_true')
+        parser.add_argument(
             "--dlp-no-keep", "-dlp-no-keep",
             help="Disable the feature that CADO_DEBUG"
                  " is set by default in dlp mode",

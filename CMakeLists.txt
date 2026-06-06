@@ -58,12 +58,14 @@ project(CADO_NFS)
 include(config/xcode.cmake)
 
 set(CADO_VERSION_MAJOR  3)
-set(CADO_VERSION_MINOR  0)
+set(CADO_VERSION_MINOR  1)
 set(CADO_VERSION_PATCHLEVEL 0)
-# This fork carries a "-modern" suffix: same upstream 3.0.0 algorithms/parameters,
-# rebased onto current toolchains (CMake 4.x, GCC 16, Python 3.14) and extended
-# with the performance/orchestration work documented in CHANGELOG.md. The numeric
-# components stay at upstream 3.0.0; only the display string is suffixed.
+# This fork carries a "-modern" suffix and, from 3.1.0-modern on, its own minor
+# line: the NFS algorithms/parameters remain upstream 3.0.0's, but the fork now
+# carries substantial original work (GPU pre-factoring, GPU linear algebra, the
+# Rust orchestration layer, UX/HPC tooling) beyond a pure upstream mirror, so the
+# minor version is bumped to reflect that. See CHANGELOG.md. No test depends on
+# the version string.
 set(CADO_VERSION_SUFFIX  "-modern")
 set(CADO_VERSION_STRING  "${CADO_VERSION_MAJOR}.${CADO_VERSION_MINOR}.${CADO_VERSION_PATCHLEVEL}${CADO_VERSION_SUFFIX}")
 

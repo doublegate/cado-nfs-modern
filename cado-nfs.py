@@ -133,6 +133,7 @@ sys.path.append(pathdict["pylib"])
 
 
 from cadofactor import toplevel, cadologger, cadotask  # noqa: E402
+from cadofactor.status import STATUS                    # noqa: E402
 from cadofactor.cadocommand import shellquote          # noqa: E402
 from cadofactor.cadoutils import Computation           # noqa: E402
 
@@ -208,15 +209,31 @@ if __name__ == '__main__':
         logger.info("Summary of all recognized parameters\n" +
                     factorjob.parameter_help)
 
+    # Optional run-status reporting (Track 3.1): --json-status / --progress.
+    # No-op unless one of those was given.
+    _comp = parameters.myparams({"computation": ""}, "").get("computation")
+    try:
+        _digits = len(str(int(parameters.get_or_set_default("N"))))
+    except (ValueError, TypeError):
+        _digits = None
+    STATUS.configure(json_path=toplevel_params.args.json_status,
+                     progress=toplevel_params.args.progress,
+                     name=name,
+                     computation=str(_comp) if _comp is not None else None,
+                     input_digits=_digits)
+
     try:
         factors = factorjob.run()
     except cadotask.EarlyStopException:
+        STATUS.finish(state="done")
         sys.exit(0)
 
     if factors is None:
+        STATUS.finish(state="error")
         toplevel_params.purge_temp_files(nopurge=True)
         sys.exit("Error occurred, terminating")
     else:
+        STATUS.finish(factors=factors, state="done")
         toplevel_params.purge_temp_files()
 
     computation_param = parameters.myparams(keys=("computation",), path="")

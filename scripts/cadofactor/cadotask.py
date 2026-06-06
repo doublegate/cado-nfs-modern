@@ -24,6 +24,7 @@ from shutil import rmtree
 from cadofactor.api_server import ApiServer
 from cadofactor.cadoutils import Algorithm, Computation
 from cadofactor.cadoutils import xgcd, CRT, next_prime
+from cadofactor.status import STATUS
 
 # Pattern for floating-point numbers
 RE_FP = r"[-+]?[0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?"
@@ -2059,8 +2060,12 @@ class ClientServerTask(Task, wudb.UsesWorkunitDb, patterns.Observer):
         # only print ETA when achievement > 0 to avoid division by zero
         a = self.get_achievement()
         if a > 0:
+            eta = self.get_eta()
             self.logger.info("Marking workunit %s as %s (%.1f%% => ETA %s)",
-                             wuid, ok_str, 100.0 * a, self.get_eta())
+                             wuid, ok_str, 100.0 * a, eta)
+            STATUS.update_progress(percent=100.0 * a, eta=eta,
+                                   wu_done=self.state["wu_received"],
+                                   wu_total=self.state["wu_submitted"])
         self.wuar.verification(wuid, ok, commit=commit)
 
     def cancel_available_wus(self):
@@ -7795,6 +7800,12 @@ class CompleteFactorization(HasState,
                     if task is None:
                         break
                     last_task = task.title
+                    try:
+                        _idx = self.tasks.index(task) + 1
+                    except ValueError:
+                        _idx = None
+                    STATUS.set_phase(task.title, index=_idx,
+                                     total=len(self.tasks))
                     last_status = task.run()
                     self.tasks_that_have_run.add(task)
                     self.logger.info(task.title)

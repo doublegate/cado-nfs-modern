@@ -10,6 +10,26 @@ rebased onto upstream **3.0.0**; only the changes introduced by this fork are
 listed. For the upstream history see [`NEWS`](NEWS). The earlier `2.3.1-modern`
 release (rebased on upstream 2.3.0) lives on the `main` branch.
 
+## [Unreleased] — 3.1.0-modern
+
+From 3.1.0-modern the fork carries its own minor line (still upstream 3.0.0's NFS
+algorithms; the bump reflects substantial original work beyond a pure mirror).
+Work in progress — see the v3.1.0 roadmap. Landed so far:
+
+### UI/UX (Track 3.1) — run-status reporting
+
+- **`--json-status FILE`** writes a machine-readable status snapshot (schema
+  `cado-nfs-status/1`: state, phase + index/total, percent, ETA, work-unit
+  counts, factors, timestamps), rewritten atomically on every update — for
+  dashboards/tooling and the forthcoming `/status` endpoint.
+- **`--progress`** shows a compact single-line progress indicator (phase ·
+  percent · work-units · ETA) on stderr (pair with `--screenlog WARNING` for a
+  clean line).
+- New dependency-free `scripts/cadofactor/status.py` singleton, fed by the
+  existing phase loop (`CompleteFactorization.run`) and per-work-unit
+  `verification()` (which already computed achievement + ETA). Off by default; no
+  behaviour change unless a flag is given. Validated on a 59-digit factorization.
+
 ## [3.0.0-modern] — 2026-06-05
 
 Rebases the modernization effort onto upstream CADO-NFS **3.0.0** and adds four
