@@ -227,6 +227,26 @@ Work in progress — see the v3.1.0 roadmap. Landed so far:
   (the three that asserted the old "no parameter file found" error now assert the
   interpolated-file behaviour). No change when an exact/near preset exists.
 
+### UI/UX (Track 3.4) — clap CLIs + cluster launcher
+
+- **clap argument parsing for both Rust binaries.** `cado-wu-server-rs` and
+  `cado-nfs-client-rs` replace their hand-rolled `parse_args` loops with `clap`
+  derive parsers, gaining real `--help`/`--version`, value validation, and clear
+  errors. Every flag name and semantic is preserved (server `--db` still required,
+  `--whitelist` still comma-separated/repeatable; client `--server` still
+  repeatable for failover, the TLS flags `--insecure`/`--cafile`/`--certsha1`
+  still set the `CADO_NFS_*` env vars the client reads). Validated end-to-end:
+  `rust/server-interop-test.sh` and `rust/server-swap-test.sh` PASS — the latter
+  drives a full c59 `product == N` with the Rust server swapped in via the Python
+  shim, launched with the exact `--db/--addr/--port/--uploaddir/--whitelist`
+  arguments the new parser handles.
+- **`scripts/cluster-launch.sh`** fans the static Rust client across a cluster:
+  SSH host list (`--hosts`/`--hostfile`, `--clients-per-host`) or Slurm
+  (`--slurm --ntasks`), all pointed at one `--server` with the same `--certsha1`
+  pinning; `--stop` kills the clients, `--dry-run` previews. Auto-finds the client
+  binary in the build/Rust target dirs. (The optional ratatui client-monitor TUI
+  is deferred.)
+
 ### GPU (Track 2.1) — pre-NFS factoring front-end (validated)
 
 - **Multi-precision (K-limb) GPU ECM.** The existing GPU ECM

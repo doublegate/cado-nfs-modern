@@ -531,48 +531,66 @@ struct Cfg {
     whitelist: Vec<String>,
 }
 
+/// clap front-end (Track 3.4: real --help / validation). Same flag names and
+/// semantics as before; mapped into Cfg so main() and the rest are unchanged.
+/// `--whitelist` still accepts a comma-separated list (and may be repeated).
+#[derive(clap::Parser)]
+#[command(name = "cado-wu-server-rs", version,
+          about = "Async work-unit server for CADO-NFS \
+                   (same HTTP protocol + wudb SQLite schema as api_server.py)")]
+struct Args {
+    /// wudb SQLite database (shared with the Python driver)
+    #[arg(long)]
+    db: PathBuf,
+    /// directory of downloadable input files
+    #[arg(long, default_value = ".")]
+    filedir: PathBuf,
+    /// directory for uploaded results (default: <tmp>/cado-wu-uploads)
+    #[arg(long)]
+    uploaddir: Option<PathBuf>,
+    /// bind address
+    #[arg(long, default_value = "127.0.0.1")]
+    addr: String,
+    /// bind port (0 = pick a free port and print it)
+    #[arg(long, default_value_t = 0)]
+    port: u16,
+    /// seconds before a stale ASSIGNED work-unit is reclaimed (0 = never)
+    #[arg(long, default_value_t = 3600)]
+    wutimeout: u64,
+    /// TLS certificate (PEM); pair with --key to serve HTTPS
+    #[arg(long)]
+    cert: Option<PathBuf>,
+    /// TLS private key (PEM)
+    #[arg(long)]
+    key: Option<PathBuf>,
+    /// admin token required by POST /control
+    #[arg(long = "admin-token")]
+    admin_token: Option<String>,
+    /// allowed client IP/CIDR(s), comma-separated and/or repeated (empty = all)
+    #[arg(long, value_delimiter = ',')]
+    whitelist: Vec<String>,
+}
+
 fn parse_args() -> Result<Cfg> {
-    let mut c = Cfg {
-        db: PathBuf::new(),
-        filedir: PathBuf::from("."),
-        uploaddir: std::env::temp_dir().join("cado-wu-uploads"),
-        addr: "127.0.0.1".into(),
-        port: 0,
-        wutimeout: 3600,
-        cert: None,
-        key: None,
-        admin_token: None,
-        whitelist: vec![],
-    };
-    let mut have_db = false;
-    let mut it = std::env::args().skip(1);
-    while let Some(a) = it.next() {
-        match a.as_str() {
-            "--db" => { c.db = it.next().context("--db value")?.into(); have_db = true; }
-            "--filedir" => c.filedir = it.next().context("--filedir")?.into(),
-            "--uploaddir" => c.uploaddir = it.next().context("--uploaddir")?.into(),
-            "--addr" => c.addr = it.next().context("--addr")?,
-            "--port" => c.port = it.next().and_then(|v| v.parse().ok()).unwrap_or(0),
-            "--wutimeout" => c.wutimeout = it.next().and_then(|v| v.parse().ok()).unwrap_or(3600),
-            "--cert" => c.cert = it.next().map(PathBuf::from),
-            "--key" => c.key = it.next().map(PathBuf::from),
-            "--admin-token" => c.admin_token = it.next(),
-            "--whitelist" => {
-                if let Some(v) = it.next() {
-                    c.whitelist
-                        .extend(v.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()));
-                }
-            }
-            "-h" | "--help" => {
-                eprintln!(
-                    "usage: cado-wu-server-rs --db <sqlite> [--filedir DIR] [--uploaddir DIR]\n\
-                     [--addr 127.0.0.1] [--port N] [--wutimeout SECS] [--cert PEM --key PEM] [--admin-token T]"
-                );
-                std::process::exit(0);
-            }
-            other => anyhow::bail!("unknown argument {other}"),
-        }
-    }
-    anyhow::ensure!(have_db, "--db <sqlite path> is required");
-    Ok(c)
+    use clap::Parser;
+    let a = Args::parse();
+    Ok(Cfg {
+        db: a.db,
+        filedir: a.filedir,
+        uploaddir: a
+            .uploaddir
+            .unwrap_or_else(|| std::env::temp_dir().join("cado-wu-uploads")),
+        addr: a.addr,
+        port: a.port,
+        wutimeout: a.wutimeout,
+        cert: a.cert,
+        key: a.key,
+        admin_token: a.admin_token,
+        whitelist: a
+            .whitelist
+            .into_iter()
+            .map(|x| x.trim().to_string())
+            .filter(|x| !x.is_empty())
+            .collect(),
+    })
 }

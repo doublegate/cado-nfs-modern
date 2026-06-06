@@ -508,67 +508,74 @@ fn upload(
     Ok(())
 }
 
-fn parse_args() -> Result<Settings> {
-    let mut servers = vec![];
-    let mut clientid = None;
-    let mut dldir = None;
-    let mut workdir = None;
-    let mut arch = String::new();
-    let mut download_retry = 10u64;
-    let mut single = false;
-    let mut niceness = 0i32;
+/// clap front-end (Track 3.4: real --help / validation). Same flag names and
+/// semantics as before; the TLS flags still set the CADO_NFS_* env vars the rest
+/// of the client reads, and `--server` may be repeated for failover.
+#[derive(clap::Parser)]
+#[command(name = "cado-nfs-client-rs", version,
+          about = "Static-binary work-unit client for CADO-NFS \
+                   (speaks the stock Python api_server protocol)")]
+struct Args {
+    /// server URL; repeat for failover (downloads/upload stick to the issuer)
+    #[arg(long = "server", required = true)]
+    server: Vec<String>,
+    /// client identifier (default: <user>@<host>.<pid>)
+    #[arg(long)]
+    clientid: Option<String>,
+    /// download directory (default: <tmp>/cado-client-dl)
+    #[arg(long)]
+    dldir: Option<PathBuf>,
+    /// work directory (default: <tmp>/cado-client-work)
+    #[arg(long)]
+    workdir: Option<PathBuf>,
+    /// architecture string advertised to the server
+    #[arg(long, default_value = "")]
+    arch: String,
+    /// seconds to wait/retry on a failed download
+    #[arg(long = "downloadretry", default_value_t = 10)]
+    download_retry: u64,
+    /// renice spawned children by this amount
+    #[arg(long, default_value_t = 0)]
+    niceness: i32,
+    /// process a single work-unit then exit
+    #[arg(long)]
+    single: bool,
+    /// skip TLS certificate verification (sets CADO_NFS_INSECURE)
+    #[arg(long)]
+    insecure: bool,
+    /// CA certificate PEM to trust (sets CADO_NFS_CAFILE)
+    #[arg(long)]
+    cafile: Option<String>,
+    /// pin the server cert by sha1 fingerprint (sets CADO_NFS_CERTSHA1)
+    #[arg(long)]
+    certsha1: Option<String>,
+}
 
-    let mut it = std::env::args().skip(1);
-    while let Some(a) = it.next() {
-        match a.as_str() {
-            "--server" => {
-                if let Some(v) = it.next() {
-                    servers.push(v);
-                }
-            }
-            "--clientid" => clientid = it.next(),
-            "--dldir" => dldir = it.next().map(PathBuf::from),
-            "--workdir" => workdir = it.next().map(PathBuf::from),
-            "--arch" => arch = it.next().unwrap_or_default(),
-            "--downloadretry" => {
-                download_retry = it.next().and_then(|v| v.parse().ok()).unwrap_or(10)
-            }
-            "--niceness" => niceness = it.next().and_then(|v| v.parse().ok()).unwrap_or(0),
-            "--certsha1" => {
-                if let Some(v) = it.next() {
-                    std::env::set_var("CADO_NFS_CERTSHA1", v);
-                }
-            }
-            "--insecure" => std::env::set_var("CADO_NFS_INSECURE", "1"),
-            "--cafile" => {
-                if let Some(v) = it.next() {
-                    std::env::set_var("CADO_NFS_CAFILE", v);
-                }
-            }
-            "--single" => single = true,
-            "-h" | "--help" => {
-                eprintln!(
-                    "usage: cado-nfs-client-rs --server URL [--server URL ...] [--clientid ID]\n\
-                     [--dldir DIR] [--workdir DIR] [--arch S] [--downloadretry SECS]\n\
-                     [--niceness N] [--single] [--insecure] [--cafile PEM] [--certsha1 HEX]"
-                );
-                std::process::exit(0);
-            }
-            other => bail!("unknown argument {other} (try --help)"),
-        }
+fn parse_args() -> Result<Settings> {
+    use clap::Parser;
+    let a = Args::parse();
+    // TLS options are passed to the rest of the client via env vars, exactly as
+    // the previous hand-rolled parser did.
+    if a.insecure {
+        std::env::set_var("CADO_NFS_INSECURE", "1");
     }
-    if servers.is_empty() {
-        bail!("at least one --server URL is required");
+    if let Some(v) = a.cafile {
+        std::env::set_var("CADO_NFS_CAFILE", v);
+    }
+    if let Some(v) = a.certsha1 {
+        std::env::set_var("CADO_NFS_CERTSHA1", v);
     }
     Ok(Settings {
-        servers,
-        clientid: clientid.unwrap_or_else(default_clientid),
-        dldir: dldir.unwrap_or_else(|| std::env::temp_dir().join("cado-client-dl")),
-        workdir: workdir.unwrap_or_else(|| std::env::temp_dir().join("cado-client-work")),
-        arch,
-        download_retry,
-        single,
-        niceness,
+        servers: a.server,
+        clientid: a.clientid.unwrap_or_else(default_clientid),
+        dldir: a.dldir.unwrap_or_else(|| std::env::temp_dir().join("cado-client-dl")),
+        workdir: a
+            .workdir
+            .unwrap_or_else(|| std::env::temp_dir().join("cado-client-work")),
+        arch: a.arch,
+        download_retry: a.download_retry,
+        single: a.single,
+        niceness: a.niceness,
     })
 }
 
