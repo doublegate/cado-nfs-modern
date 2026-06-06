@@ -177,6 +177,17 @@ Work in progress — see the v3.1.0 roadmap. Landed so far:
   documented next step (`docs/gpu-linalg.md`). The path is independent of vector
   residency (alternative strategies); `nparts>1` takes the plain
   upload/compute/writeback path.
+- **Multi-node residency — design documented (not code).** The transfer-win
+  version of residency-under-MPI is specified in `docs/gpu-linalg.md` (the
+  local-device-reduce / MPI-boundary-only-exchange split) rather than implemented,
+  for a concrete reason: transfer accounting shows any version that routes the
+  comm through host MPI just moves the two per-iteration transfers from the mul to
+  the comm (**no net win** — confirming why residency is single-node-gated), and
+  the only winning version needs ≥2 GPUs (ideally CUDA-aware MPI) to realise *and*
+  to validate for correctness (an earlier attempt hit a reduce-scatter
+  direction/offset bug and was reverted rather than ship a comm returning wrong
+  results). The doc gives the full algorithm + buffer choreography so it drops
+  into `matmul_top_mul_comm_gpu`'s `njobs>1` branch when multi-GPU HW is available.
 - **GPU linalg at scale — measured (Track 2.2 headline).** A scaling sweep
   (`bench/gpu-spmv-bench.cu`, b64, bit-exact at every size) shows the GPU SpMV
   win **grows with N**: GPU warp kernel 28.9→7.9 Gnz/s as the matrix grows

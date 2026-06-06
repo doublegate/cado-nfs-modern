@@ -368,7 +368,70 @@ kernel tuning (ELL, column sorting, shared-mem `src`) is secondary.
     per node-local rank. `product == N` validated under `mpi=1x2`/`2x1` with GPU
     SpMV; residency disables under MPI (host comm), so multi-rank runs stay
     correct on a single GPU and round-robin on multi-GPU hardware.
-- **Next:** multi-node residency with a real transfer win — split the
-  local-device reduce from the MPI data exchange so device-resident vectors are
-  exchanged only across MPI (needs CUDA-aware MPI and multi-GPU HW to validate);
+- **Next:** multi-node residency with a real transfer win (design below);
   further kernel tuning (ELL, column sorting, shared-mem `src`) is secondary.
+
+## Multi-node residency: the local-device / MPI-boundary split (design)
+
+This is the one Track 2.2 item deliberately left as a **design**, not code, because
+its value cannot be realised or validated on a single-GPU box and a naive
+implementation provably yields no win. The reasoning and the concrete algorithm:
+
+### Why the naive version is pointless (transfer accounting)
+
+Per krylov iteration, counting full-vector PCIe transfers:
+
+| strategy (under MPI, `njobs>1`) | mul transfers | comm transfers | total |
+|---|---|---|---|
+| non-resident (today's default) | H2D src + D2H dst = **2** | 0 (dst already on host) | **2** |
+| resident + host-MPI comm | **0** | D2H v + H2D v = **2** | **2** |
+| **local/MPI split (this design)** | **0** | only the MPI-boundary slice | **≪ 2** |
+
+Routing the comm through host MPI just moves the two transfers from the mul to
+the comm — no net win. That is exactly why residency is currently **gated to
+single-node**: the device 2D comm (`matmul_top_mul_comm_gpu`) only handles
+`njobs==1`, and the only MPI fallback that is simple is the (no-win) host comm.
+
+### The winning algorithm
+
+`matmul_top_mul_comm` is a reduce-scatter along one grid axis followed by an
+all-gather along the perpendicular one. Decompose each into an **intra-node**
+part (across the `ncores` threads of a rank — already done on-device, phases 1–4
+above) and an **inter-rank** part (across the `njobs` ranks of the communicator,
+today done by `MPI_Reduce_scatter_block` / `MPI_Allgather` on `vec->v`):
+
+1. **Intra-node reduce on device** (existing phases 1–2): each rank reduces its
+   `ncores` thread-buffers into one device buffer — no host transfer.
+2. **Inter-rank reduce-scatter, MPI-boundary only.** Only each rank's *own block*
+   participates in the cross-rank exchange. D2H **just that block** (size
+   `eblock*elt`, i.e. `1/njobs` of the vector — not the whole vector),
+   `MPI_Reduce_scatter_block` on host (or GPU-direct/CUDA-aware MPI straight from
+   device memory, eliminating even this D2H), then H2D the reduced own-block.
+3. **Intra-node broadcast on device** (existing phases 3–4) and **inter-rank
+   all-gather, MPI-boundary only**: exchange the `njobs` own-blocks via
+   `MPI_Allgather` (again only `1/njobs`-sized slices cross PCIe, or none with
+   CUDA-aware MPI), then assemble on device. Mark `v` device-resident.
+
+Net per-iteration PCIe traffic drops from a full vector to `~2·(1/njobs)` of it
+(host-staged), or to **zero** with CUDA-aware MPI — restoring the residency win
+under MPI. The buffer choreography mirrors the host `mmt_vec_reduce` /
+`mmt_vec_broadcast` offsets exactly (as the single-node device comm already does),
+so it is bit-for-bit the host comm by construction.
+
+### Why it is not implemented here
+
+- **Correctness needs the real topology.** A 2-rank/1-GPU run validates the
+  *single-node* path; the inter-rank device/MPI interleave is most error-prone
+  exactly where two ranks own different GPUs (peer/host staging, stream ordering).
+  An earlier attempt hit a direction/offset bug in the reduce-scatter step and was
+  reverted to the single-node gate rather than ship a comm that returns wrong
+  results. The fork's rule is "validated after every change"; this cannot be
+  validated for correctness *or* win on one GPU.
+- **The win needs ≥2 GPUs (ideally CUDA-aware MPI).** On one GPU the comm is not
+  the bottleneck the way it is across a cluster interconnect.
+
+When 2+ GPUs (and a CUDA-aware MPI) are available this design drops straight into
+`matmul_top_mul_comm_gpu`'s `njobs>1` branch, reusing the existing device-op
+hooks (`xor_block`/`copy_block`/`upload`/`download`/`mark_resident`) plus a new
+MPI-boundary exchange step. Until then, the validated single-node residency and
+the correct host-comm MPI fallback ship as-is.
