@@ -188,7 +188,7 @@ This empirically confirms the analysis: **the win requires moving the comm itsel
 onto the device**, so the vector stays device-authoritative through the comm and
 the (already-proven-correct) skip finally triggers.
 
-### Comm-on-device — the executable design (next, focused effort)
+### Comm-on-device — design, what is built, and the honest blocker
 
 Reading the comm makes the shape precise. `mmt_vec_allreduce`
 (`matmul_top_comm.cpp:738`) and `matmul_top_mul_comm` reduce **across sibling
@@ -197,32 +197,52 @@ threads' *host* buffers** (`v.sibling(k).v`, chunked by `thread_chunk`,
 with **no CUDA and no `mm` handle**. So this is a small rearchitecture, not a
 surgical edit:
 
-1. **Process-global device registry** (replace the per-`mm` pool): a thread-safe
-   `host_ptr → {device buffer, current}` map, since the comm touches *siblings'*
-   buffers and all threads share the CUDA context. The SpMV uses it as today.
-2. **A registered CUDA hook** exposed from the GPU lib via a function pointer the
-   GPU backend installs at init (so `bwc_base` keeps no hard CUDA dependency):
-   `gpu_comm_reduce(host_chunks[], ncores, chunk_items, elt_stride)` runs the
-   chunked XOR-reduce + broadcast **on the device buffers** and marks them
-   `current` (host stale). `mmt_vec_allreduce` / `matmul_top_mul_comm` call it
-   when every participating buffer is registered; else fall back to the host path.
-3. **`from_device(host_ptr)` syncs** at the host-read points the inner loop keeps:
-   `x_dotprod` (or move it to the GPU via the validated kernel), the online
-   `check`, `mmt_vec_save`, and `twist/untwist` — pull the device buffer back to
-   host only there (per-interval, not per-iteration).
-4. **MPI**: for >1 job, stage through host at the registry boundary (or CUDA-aware
-   MPI later); single-node needs none.
+1. **Process-global device registry** (replaces the per-`mm` pool) — **done,
+   `product == N`** (`matmul-gpu.cu`, `g_pool`/`g_pin`/`g_invalidate`): a
+   thread-safe `host_ptr → {device buffer, current, host_dirty}` map, since the
+   comm touches *siblings'* buffers and all threads share the CUDA context. The
+   SpMV uses it as today.
+2. **A registered CUDA hook** — **built + validated** (`matmul-gpu-hooks.h`,
+   `cado_gpu_comm_reduce_bcast` / `cado_gpu_sync_to_host`; installed by the GPU
+   backend's ctor so `bwc_base` keeps no hard CUDA dependency). The hook runs the
+   GF(2) XOR-reduce + broadcast **on the device-resident sibling buffers**
+   (`vecreduce_inplace` + `vecbroadcast_n`, bit-exact with the host path and with
+   `bench/gpu-vecreduce-bench.cu`). It is wired into `mmt_vec_allreduce` behind
+   `CADO_GPU_DEVCOMM` and gives **`product == N`** on the c60 (default,
+   `DEVCOMM`, and `VECRESIDENT+DEVCOMM`).
+3. **`from_device(host_ptr)` syncs** — `cado_gpu_sync_to_host` plumbing is in
+   place (the `host_dirty` flag), to be called at the host-read points the inner
+   loop keeps: `x_dotprod`, the online `check`, `mmt_vec_save`, `twist/untwist`.
+4. **MPI**: for >1 job, stage through host (gated to `njobs == 1` for now).
 
-With (1)–(3), the inner loop's SpMV→comm→SpMV runs entirely on device buffers, the
-H2D/D2H vanish for the steady iterations, and the **already-`product==N`-validated
-invalidation** keeps it correct. Gate: a full factorization in default *and*
-`CADO_GPU_VECRESIDENT` modes (`product == N`) after each of (1)–(3).
+**Two honest findings from wiring (2):**
 
-This is the substantial, focused next effort; the control plane it builds on is
-done and correctness-gated.
+- **`allreduce` is *not* the per-iteration hot comm for factoring.** A 1-matrix
+  factorization (the common case) goes `matmul_top_mul` → `matmul_top_mul_comm`
+  = `mmt_vec_reduce` + `mmt_vec_broadcast` (direction-changing, with the
+  reduce-scatter "pack at the beginning" repack), **not** `mmt_vec_allreduce`.
+  `allreduce` is hit only by the twist and the prep/secure rank checks. So the
+  validated hook proves the device-comm *mechanism* end-to-end, but the
+  transfer-saving port must target `reduce`+`broadcast` (harder: it repacks and
+  flips side `d`).
+- **The win is gated on invalidation/sync coverage that today only covers the
+  krylov main loop.** Marking comm'd device buffers `current` (device
+  authoritative) corrupted **prep/secure** (the rank check looped forever),
+  because those stages overwrite host buffers without an invalidation. The hook
+  is therefore currently *no-trust*: it uploads from host, reduces on device,
+  writes back, and leaves `current = false` — i.e. it is a **correctness checkpoint
+  of the device reduce in the real pipeline, not yet a transfer saver**. The
+  actual residency win (`current = true` + `host_dirty`, skipping H2D/D2H) needs
+  **complete host-write invalidation / host-read `from_device` coverage across
+  prep, secure, twist *and* krylov** — a real audit, not a one-liner.
 
-Each step is correctness-gated by a full verified factorization. Until then, the
-backend captures the bounded win (pinning) and is bit-exact.
+So the steady-state inner loop running entirely on device buffers (H2D/D2H gone)
+remains the goal; the registry (1) and the hook ABI + bit-exact device reduce (2)
+are the validated foundation, and the remaining work is the `reduce`+`broadcast`
+port plus the invalidation/sync audit, each correctness-gated by a full verified
+factorization in default *and* resident modes.
+
+Until then, the backend captures the bounded win (pinning) and is bit-exact.
 
 ## Kernel tuning — done (coalesced warp-per-row)
 
@@ -257,6 +277,15 @@ kernel tuning (ELL, column sorting, shared-mem `src`) is secondary.
     (4/4, both directions), with **pinned host-vector transfers** and a
     **coalesced warp-per-row kernel** — **8.96 Gnz/s, ~5× the full-CPU `bucket`**
     (kernel cut 2.7×; the split is now 72% transfers / 28% kernel).
-- **Next:** full vector residency (the now-dominant 72% transfer share — a
-  multi-step vector-layer port, scoped above), then multi-GPU/MPI wiring where the
-  GPU's aggregate-bandwidth advantage at scale lives.
+  - **comm-on-device foundation**: the process-global device registry, the
+    `bwc_base`↔GPU hook ABI (`matmul-gpu-hooks.h`), and a bit-exact device GF(2)
+    reduce/broadcast wired into `mmt_vec_allreduce` (behind `CADO_GPU_DEVCOMM`) —
+    `product == N` in default, `DEVCOMM`, and `VECRESIDENT+DEVCOMM` modes. This is
+    validated *plumbing*, not yet a transfer saver (it uploads+writes-back for
+    correctness; see "Comm-on-device" above).
+- **Next:** full vector residency — port the actual hot comm
+  (`mmt_vec_reduce`+`mmt_vec_broadcast`, not `allreduce`) to the device and
+  complete the host-write invalidation / host-read sync coverage across
+  prep/secure/twist/krylov so the steady iterations skip H2D/D2H (the dominant
+  72% transfer share). Then multi-GPU/MPI wiring where the GPU's
+  aggregate-bandwidth advantage at scale lives.

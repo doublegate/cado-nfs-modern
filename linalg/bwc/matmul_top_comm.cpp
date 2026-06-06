@@ -5,15 +5,23 @@
 #include <cstdlib>
 #include <cstring>
 
+#include <vector>
+
 #include "macros.h"
 #include "matmul_top.hpp"
 #include "matmul_top_comm.hpp"
 #include "matmul_top_vec.hpp"
+#include "matmul-gpu-hooks.h"
 #include "misc.h"
 #include "parallelizing_info.hpp"
 #include "select_mpi.h"
 #include "timing.h"
 #include "verbose.hpp"
+
+/* GPU comm-on-device hooks (Track 2.2). Null unless a GPU matmul backend is
+ * loaded and installs them in its constructor; null => ordinary host comm. */
+int (*cado_gpu_comm_reduce_bcast)(void * const *, unsigned int, size_t) = nullptr;
+int (*cado_gpu_sync_to_host)(void const *) = nullptr;
 
 /* Our innermost communication routines are essentially all-gather and
  * reduce-scatter, following the MPI terminology. We provide several
@@ -744,6 +752,34 @@ mmt_vec_allreduce(mmt_vec & v)
     pi_log_op(v.pi->m, "[%s:%d] enter first loop", __func__, __LINE__);
 
     serialize_threads(v.pi->m);
+
+    /* Track 2.2 comm-on-device: in the single-node case (no MPI), with a GPU
+     * matmul backend loaded and CADO_GPU_VECRESIDENT set, run the GF(2)
+     * reduce+broadcast directly on the device-resident sibling vectors. Each
+     * v.d-direction communicator's leader drives its own (disjoint) sibling set;
+     * the hook ensures the device copies are present (uploading from host if
+     * needed) and leaves them current. The result is bit-identical to the host
+     * path below. Falls through to the host path whenever the hook is absent,
+     * MPI is in play, or the vector is thread-shared. */
+    {
+        static const bool gpu_devcomm = getenv("CADO_GPU_DEVCOMM") != nullptr;
+        if (gpu_devcomm && cado_gpu_comm_reduce_bcast != nullptr
+                && wr->njobs == 1 && !mmt_vec_is_shared(v))
+        {
+            serialize_threads(wr);
+            if (wr->trank == 0) {
+                std::vector<void *> ptrs(wr->ncores);
+                for (unsigned int k = 0; k < wr->ncores; k++)
+                    ptrs[k] = v.sibling(k).v;
+                size_t const bytes = mmt_my_own_size_in_bytes(v) * wr->ncores;
+                cado_gpu_comm_reduce_bcast(ptrs.data(), wr->ncores, bytes);
+            }
+            serialize_threads(wr);
+            v.consistency = 2;
+            return;
+        }
+    }
+
     /* sum up row threads, so that only one thread on each row is used
      * for communication */
     size_t const thread_chunk = wr->njobs * mmt_my_own_size_in_items(v);

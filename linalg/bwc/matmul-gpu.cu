@@ -15,6 +15,7 @@
 #include "macros.h"
 #include "matmul.hpp"
 #include "matmul-common.hpp"
+#include "matmul-gpu-hooks.h"
 #include "matrix_u32.hpp"
 #include "params.hpp"
 
@@ -51,7 +52,10 @@
  * is single-threaded: each vector belongs to one thread, and the comm is
  * serialized by serialize_threads). Buffers are freed at process exit. */
 namespace {
-struct GDV { uint64_t * d = nullptr; size_t bytes = 0; bool current = false; };
+/* current  : device buffer holds the latest data (uploaded or just computed)
+ * host_dirty: the host buffer is stale w.r.t. the device buffer (comm-on-device
+ *             left the result only on the device; materialise via sync_to_host) */
+struct GDV { uint64_t * d = nullptr; size_t bytes = 0; bool current = false; bool host_dirty = false; };
 std::mutex g_mtx;
 std::map<const void *, GDV> g_pool;
 std::map<const void *, size_t> g_pinned;
@@ -146,6 +150,99 @@ static void launch_spmv(int K, const uint32_t * rp, const uint32_t * col,
     }
 }
 
+/* ---- comm-on-device (Track 2.2): GF(2) reduce + broadcast of sibling vectors --
+ * For the single-node BWC comm, all T sibling vectors must become the XOR-sum of
+ * the originals (mmt_vec_allreduce). We do it in place on the device-resident
+ * copies: reduce all T into sibling[0], then broadcast sibling[0] back over the
+ * rest. Each output word g touches only index g across the T buffers, so the
+ * in-place reduce into p[0] is race-free. Bit-identical to vec_add_and_reduce on
+ * the host (validated standalone in bench/gpu-vecreduce-bench.cu). */
+namespace {
+#define GPU_COMM_MAX_SIB 64
+struct PtrPack { uint64_t * p[GPU_COMM_MAX_SIB]; unsigned int T; };
+
+__global__ void vecreduce_inplace(PtrPack pk, size_t words) {
+    size_t g = (size_t) blockIdx.x * blockDim.x + threadIdx.x;
+    if (g >= words) return;
+    uint64_t acc = 0;
+    for (unsigned int t = 0; t < pk.T; t++) acc ^= pk.p[t][g];
+    pk.p[0][g] = acc;
+}
+__global__ void vecbroadcast_n(PtrPack pk, size_t words) {
+    size_t g = (size_t) blockIdx.x * blockDim.x + threadIdx.x;
+    if (g >= words) return;
+    uint64_t v = pk.p[0][g];
+    for (unsigned int t = 1; t < pk.T; t++) pk.p[t][g] = v;
+}
+
+/* The comm-on-device hook (installed into cado_gpu_comm_reduce_bcast). Returns 1
+ * when it handled the comm. Single-threaded per call (one row-communicator leader
+ * drives its own disjoint sibling set; see mmt_vec_allreduce). */
+int gpu_comm_reduce_bcast_impl(void * const * host_ptrs,
+                               unsigned int T, size_t bytes)
+{
+    if (T < 2) {            /* nothing to reduce; still mark the lone buffer */
+        if (T == 1) { GDV & g = g_dv(host_ptrs[0], bytes); g.current = true; }
+        return 1;
+    }
+    if (T > GPU_COMM_MAX_SIB) return 0;     /* unsupported width -> host fallback */
+    size_t const words = bytes / sizeof(uint64_t);
+
+    PtrPack pk; pk.T = T;
+    for (unsigned int k = 0; k < T; k++) {
+        GDV & g = g_dv(host_ptrs[k], bytes);
+        if (!g.d) return 0;                 /* allocation failed -> host fallback */
+        /* A2a: host is authoritative here (mul still does D2H), so always upload
+         * the current host data before reducing — this guarantees the device
+         * reduce operates on exactly the data the host comm would, regardless of
+         * any stale device-buffer state outside the krylov loop. */
+        CUCHECK(cudaMemcpy(g.d, host_ptrs[k], bytes, cudaMemcpyHostToDevice));
+        pk.p[k] = g.d;
+    }
+
+    int tpb = 256; size_t blk = (words + tpb - 1) / tpb;
+    vecreduce_inplace<<<blk, tpb>>>(pk, words);
+    vecbroadcast_n<<<blk, tpb>>>(pk, words);
+    CUCHECK(cudaGetLastError());
+
+    /* A2a: keep the host buffers authoritative by writing the result back, and
+     * do NOT trust the device copy afterwards (current=false) — outside the
+     * krylov main loop (prep/secure/twist) the host buffer can be overwritten
+     * without an invalidation, so a later skip-H2D must not reuse this device
+     * data. This makes A2a a pure correctness check of the device reduce in the
+     * real pipeline. The residency win (A2b) keeps current=true + host_dirty and
+     * relies on full host-read sync coverage. */
+    for (unsigned int k = 0; k < T; k++) {
+        GDV & g = g_dv(host_ptrs[k], bytes);
+        CUCHECK(cudaMemcpy(host_ptrs[k], g.d, bytes, cudaMemcpyDeviceToHost));
+        g.current = false; g.host_dirty = false;
+    }
+    return 1;
+}
+
+/* Materialise a device-resident vector to host if the device copy is newer. */
+int gpu_sync_to_host_impl(void const * host_ptr)
+{
+    std::lock_guard<std::mutex> lk(g_mtx);
+    auto it = g_pool.find(host_ptr);
+    if (it == g_pool.end() || !it->second.host_dirty || !it->second.d) return 0;
+    CUCHECK(cudaMemcpy((void *) host_ptr, it->second.d, it->second.bytes,
+                       cudaMemcpyDeviceToHost));
+    it->second.host_dirty = false;
+    return 1;
+}
+
+/* install the hooks exactly once */
+void gpu_install_hooks() {
+    static bool done = false;
+    std::lock_guard<std::mutex> lk(g_mtx);
+    if (done) return;
+    cado_gpu_comm_reduce_bcast = gpu_comm_reduce_bcast_impl;
+    cado_gpu_sync_to_host = gpu_sync_to_host_impl;
+    done = true;
+}
+} // namespace
+
 template<typename Arith>
 struct matmul_gpu : public matmul_interface {
     Arith * xab;
@@ -180,6 +277,7 @@ struct matmul_gpu : public matmul_interface {
         int const suggest = optimized_direction ^ MM_DIR0_PREFERS_TRANSP_MULT;
         store_transposed = suggest;
         param_list_parse(pl, "mm_store_transposed", store_transposed);
+        gpu_install_hooks();    /* make comm-on-device reachable from bwc_base */
     }
     matmul_gpu(matmul_gpu const &) = delete;
     matmul_gpu& operator=(matmul_gpu const &) = delete;
