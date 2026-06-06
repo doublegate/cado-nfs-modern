@@ -173,6 +173,30 @@ Work in progress — see the v3.1.0 roadmap. Landed so far:
   a 90-digit GNFS with `mm_impl=gpu` + residency returns `product == N` (bwc 8.18s
   real — small at c90, sieving-dominated). Recorded in `BENCHMARKS.md`.
 
+### CPU/SIMD (Track 1.1) — AVX-512 VPCLMULQDQ gf2x auto-detection
+
+- **gf2x VPCLMULQDQ backend auto-detection.** `gf2x/config/features.m4` adds
+  `CHECK_VPCLMUL_SUPPORT` (+ a `VPCLMUL_EXAMPLE` using `_mm512_clmulepi64_epi128`)
+  and `configure.ac` prefers the `x86_64_vpclmul` backend over `x86_64_pclmul`
+  when supported. Because the probe uses `AC_RUN_IFELSE`, it only says "yes" when
+  the test program actually runs — so a non-AVX-512 host (the Comet Lake reference
+  box) reports "no" and keeps the pclmul backend: **no mis-selection, no
+  regression** (verified: regenerated `configure` selects `x86_64_pclmul` here and
+  gf2x's own `make check` passes). On real AVX-512 silicon the VPCLMULQDQ backend
+  (hot `mul1` accelerated; `mul2`–`mul9` are the proven PCLMUL code, valid there)
+  is selected automatically.
+- **`mul1` bit-exact under Intel SDE** (`bench/vpclmul-validate.sh`, now
+  auto-finding `/opt/intel-sde/sde64`): PASS, 200 000 trials vs the scalar
+  reference — the primary Drucker–Gueron base-case win.
+- **CI validation** (`.github/workflows/avx512-validate.yml`): regenerates
+  `configure` (autoreconf, in CI's clean autotools env — so the source commit
+  doesn't churn this box's vendored libtool/automake), checks the auto-detection,
+  validates `mul1` under SDE (objdump fallback if SDE is unavailable), and — when
+  SDE is present — force-builds the `x86_64_vpclmul` backend and runs gf2x's tests
+  under `sde64 -future`. Correctness-only; the ~39% perf gain is measurable only on
+  AVX-512 hardware. Remaining (perf-gated): port `mul2`–`mul9` to VPCLMULQDQ +
+  threshold retune (see `gf2x/already_tuned/x86_64_vpclmul/INTEGRATION.md`).
+
 ### UI/UX (Track 3.1) — run-status reporting
 
 - **`--json-status FILE`** writes a machine-readable status snapshot (schema

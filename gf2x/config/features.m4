@@ -98,6 +98,11 @@ AC_DEFUN([CHECK_SSE41_SUPPORT],
  [FEATURE_CHECK(SSE41,sse-4.1,-msse4.1,sse41,msse41,ssse3)])
 AC_DEFUN([CHECK_PCLMUL_SUPPORT],
  [FEATURE_CHECK(PCLMUL,pclmul,-mpclmul,pclmul,mpclmul,sse41)])
+# VPCLMULQDQ: AVX-512 vector carry-less multiply (4 clmuls / insn). Parent is
+# pclmul; the FEATURE_CHECK run-test naturally gates on real silicon (a non-AVX512
+# host SIGILLs the probe -> "no" -> the x86_64_pclmul backend is kept).
+AC_DEFUN([CHECK_VPCLMUL_SUPPORT],
+ [FEATURE_CHECK(VPCLMUL,vpclmul,-mvpclmulqdq -mavx512f,vpclmul,mvpclmul,pclmul)])
 # Only checked by apps/
 AC_DEFUN([CHECK_BMI2_SUPPORT],
  [FEATURE_CHECK(BMI2,bmi2,-mbmi2,bmi2,mbmi2,sse41)])
@@ -221,6 +226,26 @@ int main() {
     __m128i b = _gf2x_mm_set1_epi64(a1);
     union { __m128i s; unsigned long x[[2]]; } proxy;
     proxy.s = _mm_clmulepi64_si128(a, b, 0);
+    return proxy.x[[0]] - 650;
+}
+])])
+
+AC_DEFUN([VPCLMUL_EXAMPLE],[AC_LANG_SOURCE([
+#include <stdint.h>
+#include <immintrin.h>
+#include <assert.h>
+
+int main() {
+    assert(sizeof(unsigned long) == 8); /* assume 64-bit */
+    volatile int a0 = 17;
+    volatile int a1 = 42;
+    /* a 512-bit vector of four 128-bit lanes, each holding a0/a1 in its
+     * low/high 64-bit halves; _mm512_clmulepi64_epi128 carry-less-multiplies
+     * the selected 64-bit halves of each 128-bit lane (4 clmuls in one insn). */
+    __m512i a = _mm512_set1_epi64((int64_t) a0);
+    __m512i b = _mm512_set1_epi64((int64_t) a1);
+    union { __m512i s; unsigned long x[[8]]; } proxy;
+    proxy.s = _mm512_clmulepi64_epi128(a, b, 0);
     return proxy.x[[0]] - 650;
 }
 ])])

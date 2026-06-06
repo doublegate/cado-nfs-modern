@@ -12,7 +12,9 @@ set -eu
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="$HERE/vpclmul-mul1n.c"
 BIN="${TMPDIR:-/tmp}/vpclmul-test"
-SDE="${SDE:-$(command -v sde64 || command -v sde || true)}"
+SDE="${SDE:-$(command -v sde64 || command -v sde \
+    || ls /opt/intel-sde/sde64 2>/dev/null \
+    || ls /opt/sde*/sde64 2>/dev/null | head -1 || true)}"
 
 echo "# compiling $SRC with -mavx512f -mvpclmulqdq"
 ${CC:-gcc} -O2 -mavx512f -mvpclmulqdq -Wall -Wextra "$SRC" -o "$BIN"

@@ -117,6 +117,7 @@ else
  CHECK_SSSE3_SUPPORT()
  CHECK_SSE41_SUPPORT()
  CHECK_PCLMUL_SUPPORT()
+ CHECK_VPCLMUL_SUPPORT()
   case "x$CFLAGS" in #((
     *-march=*)
       AS_ECHO(["Not doing test for -march=native or -mtune=native, since a -march flag was found in the command line"])
@@ -161,11 +162,19 @@ if test x$hwdir = x ; then
     ;;
    core2|opteron|x86_64|nocona|k10|core*)
     # Note: could set to something else if we have separate tuning files.
-    if test "$gf2x_cv_cc_supports_pclmul" = "no" ; then
-      hwdir=x86_64
-    else
-      hwdir=x86_64_pclmul
-    fi
+    # Prefer the AVX-512 VPCLMULQDQ backend when the compiler+CPU support it
+    # (the run-test in CHECK_VPCLMUL_SUPPORT only says "yes" on real AVX-512
+    # silicon), else the SSE pclmul backend, else the generic x86_64 one.
+    case "$gf2x_cv_cc_supports_vpclmul" in #((
+      yes*) hwdir=x86_64_vpclmul ;;
+      *)
+        if test "$gf2x_cv_cc_supports_pclmul" = "no" ; then
+          hwdir=x86_64
+        else
+          hwdir=x86_64_pclmul
+        fi
+        ;;
+    esac
     if test x$ABI = x32 ; then
      if test "$gf2x_cv_cc_supports_sse2" = "no" ; then
       hwdir=generic32

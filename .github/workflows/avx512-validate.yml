@@ -1,0 +1,82 @@
+name: AVX-512 gf2x validation
+
+# Correctness-only validation of the AVX-512 VPCLMULQDQ gf2x backend
+# (Track 1.1). GitHub's stock runners are not guaranteed to expose AVX-512, and
+# this fork's reference box is Comet Lake (no AVX-512), so — exactly as the
+# v3.0.0 method — we validate under Intel SDE, which emulates a future AVX-512
+# CPU. SDE install is best-effort: if it is unavailable the validator falls back
+# to compiling the kernel and confirming the real `vpclmul` instruction is
+# emitted (objdump), which still catches a broken port. This is a CORRECTNESS
+# gate; the ~39% perf gain is only measurable on real AVX-512 silicon.
+
+on:
+  push:
+    paths:
+      - 'gf2x/**'
+      - 'bench/vpclmul-*'
+      - '.github/workflows/avx512-validate.yml'
+  pull_request:
+    paths:
+      - 'gf2x/**'
+      - 'bench/vpclmul-*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: avx512-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  vpclmul:
+    name: VPCLMULQDQ gf2x bit-exact under SDE
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Intel SDE (best-effort)
+        run: |
+          set -x
+          # Pinned Intel SDE for Linux. If the download fails (Intel rotates
+          # mirror IDs), the validator below falls back to an objdump check.
+          ver=sde-external-9.58.0-2025-04-21-lin
+          url=https://downloadmirror.intel.com/843185/${ver}.tar.xz
+          if curl -fsSL "$url" -o /tmp/sde.tar.xz; then
+            mkdir -p /opt/intel-sde
+            tar -xJf /tmp/sde.tar.xz -C /opt/intel-sde --strip-components=1
+            echo "SDE=$(find /opt/intel-sde -name sde64 | head -1)" >> "$GITHUB_ENV"
+          else
+            echo "SDE download failed; validator will use the objdump fallback."
+          fi
+
+      - name: Validate the VPCLMULQDQ mul_1_n kernel (bit-exact vs scalar)
+        run: bash bench/vpclmul-validate.sh
+
+      - name: Regenerate gf2x configure and check VPCLMUL auto-detection
+        run: |
+          set -x
+          sudo apt-get update
+          sudo apt-get install -y autoconf automake libtool
+          cd gf2x && autoreconf -i
+          # On a runner without AVX-512 the run-test must NOT select vpclmul
+          # (it would SIGILL). With SDE present we can also exercise the
+          # positive path by running configure's tests under emulation.
+          mkdir -p /tmp/gf2xck && cd /tmp/gf2xck
+          "$GITHUB_WORKSPACE/gf2x/configure" CFLAGS="-O2" >cfg.log 2>&1 || (cat cfg.log; exit 1)
+          grep -E 'hwdir=' cfg.log | tail -1
+          make -j"$(nproc)"
+          make check
+
+      - name: Build the vpclmul backend and run gf2x tests under SDE
+        if: env.SDE != ''
+        run: |
+          set -x
+          mkdir -p /tmp/gf2xvpcl && cd /tmp/gf2xvpcl
+          # Force the vpclmul hwdir and the AVX-512 flags, then run the test
+          # binaries under SDE (LOG_COMPILER) so the emulated CPU executes them.
+          "$GITHUB_WORKSPACE/gf2x/configure" hwdir=x86_64_vpclmul \
+            CFLAGS="-O2 -mavx512f -mvpclmulqdq" >cfg.log 2>&1 || (cat cfg.log; exit 1)
+          grep -E 'hwdir=' cfg.log | tail -1
+          make -j"$(nproc)"
+          make check LOG_COMPILER="$SDE -future --"
