@@ -137,3 +137,40 @@ $PY ./cado-nfs.py 29848636871119008509335466066734690564059802472985123666348029
 
 _Re-measured 2026-06-05 on the 3.0.0-modern build (the machine above). Re-run on
 your own hardware to recalibrate; `-t <n>` sets the thread count._
+
+---
+
+## GPU pre-factoring ECM — CPU vs GPU (v3.1.0-modern, Track 2.1)
+
+Throughput of the multi-precision ECM (stage-1 + stage-2 BSGS) that powers the
+GPU pre-NFS factoring front-end (`misc/gpu_prefactor`). The **same**
+`__host__ __device__` `ecm_run2` runs on both sides — the CPU side parallelized
+across all 20 threads with `std::thread` — so this is an apples-to-apples
+algorithm comparison, not a comparison against a different ECM. `B1=50000`,
+`B2=5e6`, **RTX 3090 vs the full i9-10850K** (`bench/gpu-prefactor-bench.cu`).
+
+| Modulus width | GPU (curves/s) | CPU, 20 threads (curves/s) | GPU speedup |
+|---|---:|---:|---:|
+| 128-bit (≤~38 digit N) | 16 844 | 342 | **49.3×** |
+| 256-bit (≤~77 digit N) | 3 058 | 120 | **25.5×** |
+| 512-bit (≤~154 digit N) | 332 | 31 | **10.8×** |
+
+**Honest reading:** the GPU's advantage **shrinks as the modulus widens** —
+wider K-limb arithmetic uses more registers/local memory per thread, lowering GPU
+occupancy. For NFS-sized inputs (≥85 digits → 512-bit width) it is ~11× the whole
+CPU; for the smaller cofactors that arise after partial stripping, 25–49×. Either
+way the pre-factoring stage is a real GPU win (unlike in-sieve cofactorization —
+see `docs/gpu-cofactorization.md`), because it is a *separate* stage with no
+Amdahl ceiling. End-to-end, a 90-digit N with a 14-digit factor is fully
+resolved by `cado-nfs.py --gpu-prefactor` in seconds, skipping NFS entirely.
+
+```bash
+# build the GPU pre-factoring tool + benchmark (needs CUDA)
+nvcc -arch=sm_86 -O3 misc/gpu_prefactor/gpu-prefactor.cu -lgmp -o gpu-prefactor
+nvcc -arch=sm_86 -O3 -Xcompiler -pthread bench/gpu-prefactor-bench.cu -lgmp -o gpu-prefactor-bench
+./gpu-prefactor <N> staged 30        # escalating-B1 schedule up to ~30-digit factors
+./gpu-prefactor-bench                 # the table above
+```
+
+_Measured 2026-06-05 on the RTX 3090 + i9-10850K. The pre-factoring ECM math is
+validated bit-exact (`bench/gpu-ecm-mp.cu`)._

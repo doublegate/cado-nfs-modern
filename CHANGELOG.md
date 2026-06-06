@@ -77,6 +77,16 @@ Work in progress — see the v3.1.0 roadmap. Landed so far:
   Validated: a 90-digit N (14-digit × 76-digit prime) was factored entirely by
   the GPU pre-stage in seconds, **product == N**, NFS skipped; normal runs
   without the flag are unaffected.
+- **Staged-`B1` schedule** (`gpu-prefactor <N> staged [maxdigits] [scale]`):
+  escalating `B1` (2000 → 11000 → 50000 → 250000 → 1e6 → 3e6) so small factors
+  are found cheaply before spending curves at high `B1`; stops as soon as the
+  cofactor is 1/prime. Reaches ~20–30-digit factors.
+- **CPU-vs-GPU benchmark** (`bench/gpu-prefactor-bench.cu`): the *same* `ecm_run2`
+  on the GPU vs the full 20-thread CPU (`std::thread`) — **49× / 25× / 11×** at
+  128/256/512-bit on an RTX 3090 vs i9-10850K (the advantage shrinks at wider
+  moduli as register/local-memory pressure lowers GPU occupancy — honest caveat).
+  Recorded in `BENCHMARKS.md`. (Caught and fixed a dead-code-elimination trap: the
+  CPU side needs an observable sink or the optimizer removes the whole ECM.)
 
 ## [3.0.0-modern] — 2026-06-05
 

@@ -178,60 +178,96 @@ static bool ecm_pass(const mpz_t N, int ncurves,
     return any;
 }
 
-int main(int argc, char**argv){
-    if(argc<2){ fprintf(stderr,"usage: %s <N> [B1=50000] [curves=4096] [B2=100*B1]\n",argv[0]); return 2; }
-    mpz_t N; mpz_init(N);
-    if(mpz_set_str(N, argv[1], 10)!=0){ fprintf(stderr,"bad N\n"); return 2; }
-    unsigned long B1 = argc>2 ? strtoul(argv[2],0,10) : 50000;
-    int ncurves      = argc>3 ? atoi(argv[3]) : 4096;
-    unsigned long B2 = argc>4 ? strtoul(argv[4],0,10) : 100UL*B1;
+/* one stage at (B1,B2): sieve, pick K from the current modulus size, run ECM,
+ * append found prime factors of `mod`. Returns 1 if any found, -1 if too big. */
+static int run_stage(const mpz_t mod, unsigned long B1, unsigned long B2,
+                     int curves, std::vector<std::string> &found, double &cps){
     if(B2<B1) B2=B1;
-
-    size_t bits = mpz_sizeinbase(N,2);
-    int needK = (int)((bits+2+63)/64);
-    int K = needK<=2?2: needK<=4?4: needK<=8?8: needK<=16?16: 0;
-    if(K==0){ fprintf(stderr,"N too large (%zu bits); supported up to 1022 bits (~307 digits)\n",bits); return 2; }
-    if(mpz_even_p(N)){ fprintf(stderr,"N is even; strip factors of 2 first\n"); return 2; }
-
-    /* sieve to B2: stage-1 prime powers <= B1, stage-2 primes in (B1,B2] */
     std::vector<u64> spow, pr; std::vector<char> comp(B2+1,0);
     for(unsigned long p=2;p<=B2;p++) if(!comp[p]){
         for(unsigned long q=p*p;q<=B2;q+=p) comp[q]=1;
         if(p<=B1){ u64 pe=p; while(pe*p<=B1) pe*=p; spow.push_back(pe); }
         else pr.push_back(p);
     }
-
-    printf("# GPU ECM pre-factor: %zu-bit N (~%zu digits), width K=%d (%d-bit), B1=%lu, B2=%lu, curves=%d (Suyama+stage2)\n",
-           bits, mpz_sizeinbase(N,10), K, 64*K, B1, B2, ncurves);
-    printf("#   %zu stage-1 multipliers, %zu stage-2 primes\n", spow.size(), pr.size());
-
-    std::vector<std::string> found; double cps=0; bool any=false;
+    size_t bits=mpz_sizeinbase(mod,2);
+    int needK=(int)((bits+2+63)/64);
+    int K=needK<=2?2:needK<=4?4:needK<=8?8:needK<=16?16:0;
+    if(K==0) return -1;
+    bool any=false;
     switch(K){
-        case 2:  any=ecm_pass<2 >(N,ncurves,spow,pr,found,cps); break;
-        case 4:  any=ecm_pass<4 >(N,ncurves,spow,pr,found,cps); break;
-        case 8:  any=ecm_pass<8 >(N,ncurves,spow,pr,found,cps); break;
-        case 16: any=ecm_pass<16>(N,ncurves,spow,pr,found,cps); break;
+        case 2:  any=ecm_pass<2 >(mod,curves,spow,pr,found,cps); break;
+        case 4:  any=ecm_pass<4 >(mod,curves,spow,pr,found,cps); break;
+        case 8:  any=ecm_pass<8 >(mod,curves,spow,pr,found,cps); break;
+        case 16: any=ecm_pass<16>(mod,curves,spow,pr,found,cps); break;
     }
-    printf("# throughput: %.0f curves/s on the GPU (stage1+stage2)\n", cps);
+    return any?1:0;
+}
 
-    /* divide out everything found; report factors + remaining cofactor */
+/* divide the found factors out of N, report stripped factors + cofactor */
+static int report(const mpz_t N, std::vector<std::string> &found){
     mpz_t cof; mpz_init_set(cof,N);
     for(auto &f: found){ mpz_t fz; mpz_init_set_str(fz,f.c_str(),10);
-        while(mpz_divisible_p(cof,fz)) mpz_divexact(cof,cof,fz);
-        mpz_clear(fz); }
-    if(any){
-        printf("factors stripped:");
-        for(auto &f: found) printf(" %s", f.c_str());
-        printf("\n");
+        while(mpz_divisible_p(cof,fz)) mpz_divexact(cof,cof,fz); mpz_clear(fz); }
+    int rc;
+    if(!found.empty()){
+        printf("factors stripped:"); for(auto &f: found) printf(" %s", f.c_str()); printf("\n");
         char *c=mpz_get_str(NULL,10,cof);
         printf("remaining cofactor: %s%s\n", c,
                mpz_probab_prime_p(cof,25)? "  (prime)" :
                (mpz_cmp_ui(cof,1)==0? "  (fully factored)" : "  (composite -> hand to NFS)"));
-        free(c);
+        free(c); rc=0;
+    } else { printf("no factor found (try a larger B1/B2 or more curves)\n"); rc=1; }
+    mpz_clear(cof); return rc;
+}
+
+int main(int argc, char**argv){
+    if(argc<2){ fprintf(stderr,
+        "usage: %s <N> [B1=50000] [curves=4096] [B2=100*B1]\n"
+        "       %s <N> staged [maxdigits=30] [curve_scale=1.0]\n", argv[0],argv[0]); return 2; }
+    mpz_t N; mpz_init(N);
+    if(mpz_set_str(N, argv[1], 10)!=0){ fprintf(stderr,"bad N\n"); return 2; }
+    if(mpz_even_p(N)){ fprintf(stderr,"N is even; strip factors of 2 first\n"); return 2; }
+    size_t bits=mpz_sizeinbase(N,2);
+    if(bits>1022){ fprintf(stderr,"N too large (%zu bits); supported up to ~307 digits\n",bits); return 2; }
+
+    std::vector<std::string> found; double cps=0;
+
+    if(argc>2 && strcmp(argv[2],"staged")==0){
+        int maxdig = argc>3 ? atoi(argv[3]) : 30;
+        double scale = argc>4 ? atof(argv[4]) : 1.0;
+        /* escalating-B1 schedule (B1, curves, target factor digits); stop once
+         * the cofactor is 1/prime. Small factors are found cheaply at low B1
+         * before spending curves at high B1. */
+        struct St{ unsigned long b1; int curves; int dig; };
+        St sched[]={{2000,2000,15},{11000,3000,20},{50000,4000,25},
+                    {250000,6000,30},{1000000,8000,35},{3000000,12000,40}};
+        printf("# staged GPU ECM pre-factor on a %zu-digit N, up to ~%d-digit factors\n",
+               mpz_sizeinbase(N,10), maxdig);
+        mpz_t cof; mpz_init_set(cof,N);
+        for(auto &st: sched){
+            if(st.dig>maxdig) break;
+            if(mpz_cmp_ui(cof,1)==0 || mpz_probab_prime_p(cof,25)) break;
+            int cv=(int)(st.curves*scale); if(cv<1) cv=1;
+            printf("# stage: B1=%lu B2=%lu curves=%d (target ~%d-digit) ...\n",
+                   st.b1, 100*st.b1, cv, st.dig);
+            size_t before=found.size();
+            run_stage(cof, st.b1, 100UL*st.b1, cv, found, cps);
+            for(size_t i=before;i<found.size();i++){ mpz_t fz; mpz_init_set_str(fz,found[i].c_str(),10);
+                while(mpz_divisible_p(cof,fz)) mpz_divexact(cof,cof,fz); mpz_clear(fz); }
+            printf("#   %.0f curves/s; %zu factor(s) stripped so far\n", cps, found.size());
+        }
+        mpz_clear(cof);
     } else {
-        printf("no factor found at B1=%lu with %d curves (try a larger B1 / more curves)\n",
-               B1, ncurves);
+        unsigned long B1 = argc>2 ? strtoul(argv[2],0,10) : 50000;
+        int ncurves      = argc>3 ? atoi(argv[3]) : 4096;
+        unsigned long B2 = argc>4 ? strtoul(argv[4],0,10) : 100UL*B1;
+        printf("# GPU ECM pre-factor: %zu-bit N (~%zu digits), B1=%lu, B2=%lu, curves=%d (Suyama+stage2)\n",
+               bits, mpz_sizeinbase(N,10), B1, B2<B1?B1:B2, ncurves);
+        run_stage(N, B1, B2, ncurves, found, cps);
+        printf("# throughput: %.0f curves/s on the GPU (stage1+stage2)\n", cps);
     }
-    mpz_clear(cof); mpz_clear(N);
-    return any?0:1;
+
+    int rc=report(N, found);
+    mpz_clear(N);
+    return rc;
 }

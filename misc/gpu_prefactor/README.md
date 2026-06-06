@@ -42,12 +42,19 @@ Or standalone:
 
 ```bash
 nvcc -arch=sm_86 -O3 misc/gpu_prefactor/gpu-prefactor.cu -lgmp -o gpu-prefactor
-./gpu-prefactor <N> [B1=50000] [curves=4096] [B2=100*B1]
+./gpu-prefactor <N> [B1=50000] [curves=4096] [B2=100*B1]   # single stage
+./gpu-prefactor <N> staged [maxdigits=30] [curve_scale=1.0]  # escalating-B1 schedule
 ```
 
 Stage-2 (BSGS) + Suyama-σ curves are on by default; each run self-checks a
 32-lane subset GPU-vs-CPU (`# selfcheck: PASS`). The curve batch is split across
-all visible GPUs (multi-GPU; one launch on a single-GPU box).
+all visible GPUs (multi-GPU; one launch on a single-GPU box). The **staged** mode
+escalates `B1` (2000 → … → 3e6), finding small factors cheaply before spending
+curves at high `B1`, and stops once the cofactor is prime/1.
+
+**Speed (vs the full CPU, same ECM):** ~**49× / 25× / 11×** at 128/256/512-bit on
+an RTX 3090 vs a 20-thread i9-10850K (`bench/gpu-prefactor-bench.cu`; the GPU
+edge shrinks at wider moduli). See `BENCHMARKS.md`.
 
 Example (a 12-digit factor inside a 103-digit `N`):
 
@@ -81,9 +88,9 @@ the GPU in seconds, NFS skipped.
   stage-2 BSGS + Suyama-σ curves (per-run GPU-vs-CPU self-check); multi-GPU
   batching; the CMake target (`-DENABLE_GPU=ON`, device `-O3`, `sm_86`); and the
   `cado-nfs.py --gpu-prefactor` integration (fast-path skip + cofactor
-  continuation).
-- **Next (Track 2.1):** a staged-`B1` schedule for larger factors, and a
-  benchmark vs CPU GMP-ECM across factor sizes.
+  continuation); the staged-`B1` schedule; and the CPU-vs-GPU benchmark.
+- **Next (Track 2.1, optional):** per-cofactor adaptive curve counts; and
+  exposing the staged schedule through `cado-nfs.py --gpu-prefactor`.
 
-Reach today: ~15-digit factors at `B1=50000`; raising `B1`/`B2`/`curves` extends
-it (the usual ECM trade-off).
+Reach today: ~20–30-digit factors via `staged`; raising `B1`/`B2`/`curves`
+extends it (the usual ECM trade-off).
