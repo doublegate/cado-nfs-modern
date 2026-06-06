@@ -6,6 +6,7 @@
 #include <vector>
 #include <utility>
 #include <map>
+#include <mutex>
 
 #include <cuda_runtime.h>
 
@@ -41,6 +42,45 @@
 #define CUCHECK(call) do { cudaError_t e_ = (call); if (e_ != cudaSuccess) { \
     fprintf(stderr, "matmul-gpu: %s: %s\n", #call, cudaGetErrorString(e_)); \
     abort(); } } while (0)
+
+/* ---- process-global device-vector registry (Track 2.2 residency wiring) ----
+ * Keyed by host vector pointer. Process-global (not per-mm) because the BWC comm
+ * reduces across *sibling threads'* vectors, which live in other threads' mm; all
+ * threads share the one CUDA context, so a sibling's device buffer is reachable
+ * here by its host pointer. Thread-safe map ops (the CUDA work on a given buffer
+ * is single-threaded: each vector belongs to one thread, and the comm is
+ * serialized by serialize_threads). Buffers are freed at process exit. */
+namespace {
+struct GDV { uint64_t * d = nullptr; size_t bytes = 0; bool current = false; };
+std::mutex g_mtx;
+std::map<const void *, GDV> g_pool;
+std::map<const void *, size_t> g_pinned;
+
+/* device buffer for a host vector (created/grown as needed) */
+GDV & g_dv(const void * host, size_t bytes) {
+    std::lock_guard<std::mutex> lk(g_mtx);
+    GDV & x = g_pool[host];
+    if (x.bytes < bytes) { if (x.d) cudaFree(x.d);
+        if (cudaMalloc(&x.d, bytes) != cudaSuccess) { x.d = nullptr; x.bytes = 0; }
+        else x.bytes = bytes;
+        x.current = false; }
+    return x;
+}
+void g_pin(const void * p, size_t bytes) {
+    std::lock_guard<std::mutex> lk(g_mtx);
+    auto it = g_pinned.find(p);
+    if (it != g_pinned.end()) { if (bytes <= it->second) return;
+        cudaHostUnregister((void *) p); g_pinned.erase(it); }
+    if (cudaHostRegister((void *) p, bytes, cudaHostRegisterDefault) == cudaSuccess)
+        g_pinned[p] = bytes;
+    else cudaGetLastError();
+}
+void g_invalidate(const void * host) {
+    std::lock_guard<std::mutex> lk(g_mtx);
+    auto it = g_pool.find(host);
+    if (it != g_pool.end()) it->second.current = false;
+}
+} // namespace
 
 /* one thread per output row: dst[i] = XOR over row i of src[col], K limbs each */
 template<int K>
@@ -118,42 +158,12 @@ struct matmul_gpu : public matmul_interface {
     uint32_t * d_rp[2] = { nullptr, nullptr };
     uint32_t * d_col[2] = { nullptr, nullptr };
     unsigned int nrows_dir[2] = { 0, 0 };
-    /* persistent per-host-vector device buffer pool. With CADO_GPU_VECRESIDENT
-     * set, a buffer flagged `current` (device == host) lets mul() skip the H2D
-     * upload; host_vector_modified() clears the flag when the caller writes the
-     * host buffer (the comm / twist). Default (flag unset): always upload, so
-     * behaviour is bit-identical to before. */
-    struct DV { uint64_t * d = nullptr; size_t bytes = 0; bool current = false; };
-    std::map<const void *, DV> pool;
-    DV & dv_for(const void * host, size_t bytes) {
-        DV & x = pool[host];
-        if (x.bytes < bytes) { if (x.d) cudaFree(x.d); CUCHECK(cudaMalloc(&x.d, bytes));
-            x.bytes = bytes; x.current = false; }
-        return x;
-    }
-
-    /* BWC reuses the same host vector buffers across the thousands of SpMV
-     * iterations, so we page-lock (pin) each one the first time we see it ->
-     * every H2D/D2H transfer then runs at full PCIe bandwidth instead of the
-     * staged pageable path. (Full device residency -- vectors never leaving the
-     * GPU -- would need changes in the mmt_vec layer above; this is the safe,
-     * contained win at the backend level.) */
+    /* device vectors live in the process-global registry (g_pool/g_pin above),
+     * so the comm can reach sibling threads' buffers. With CADO_GPU_VECRESIDENT
+     * set, a buffer flagged `current` lets mul() skip the H2D; default: always
+     * upload (bit-identical). */
     /* split-timing accumulators (ms), used when CADO_GPU_TIMING is set */
     double t_h2d = 0, t_ker = 0, t_d2h = 0; long t_n = 0;
-
-    std::map<const void *, size_t> pinned;
-    void ensure_pinned(const void * p, size_t bytes) {
-        auto it = pinned.find(p);
-        if (it != pinned.end()) {
-            if (bytes <= it->second) return;          /* already pinned big enough */
-            cudaHostUnregister((void *) p);           /* grow the registration */
-            pinned.erase(it);
-        }
-        if (cudaHostRegister((void *) p, bytes, cudaHostRegisterDefault) == cudaSuccess)
-            pinned[p] = bytes;
-        else
-            cudaGetLastError();                       /* not pinnable -> pageable, still correct */
-    }
 
     void build_cache(matrix_u32 &&) override;
     int reload_cache_private() override;
@@ -255,11 +265,11 @@ void matmul_gpu<Arith>::mul(void * xdst, void const * xsrc, int d)
 
     size_t srcbytes = (size_t) ncols * K * sizeof(uint64_t);
     size_t dstbytes = (size_t) nrows * K * sizeof(uint64_t);
-    DV & sv = dv_for(xsrc, srcbytes);
-    DV & wv = dv_for(xdst, dstbytes);
+    GDV & sv = g_dv(xsrc, srcbytes);
+    GDV & wv = g_dv(xdst, dstbytes);
 
-    ensure_pinned(xsrc, srcbytes);
-    ensure_pinned(xdst, dstbytes);
+    g_pin(xsrc, srcbytes);
+    g_pin(xdst, dstbytes);
 
     static const bool resident = getenv("CADO_GPU_VECRESIDENT") != nullptr;
     static const bool timing = getenv("CADO_GPU_TIMING") != nullptr;
@@ -297,8 +307,7 @@ void matmul_gpu<Arith>::mul(void * xdst, void const * xsrc, int d)
 template<typename Arith>
 void matmul_gpu<Arith>::host_vector_modified(void const * hostvec)
 {
-    auto it = pool.find(hostvec);
-    if (it != pool.end()) it->second.current = false;
+    g_invalidate(hostvec);
 }
 
 template<typename Arith>
@@ -311,8 +320,8 @@ matmul_gpu<Arith>::~matmul_gpu()
                 100.0 * (t_h2d + t_d2h) / (t_h2d + t_ker + t_d2h));
     }
     for (int i = 0; i < 2; i++) { if (d_rp[i]) cudaFree(d_rp[i]); if (d_col[i]) cudaFree(d_col[i]); }
-    for (auto const & kv : pool) if (kv.second.d) cudaFree(kv.second.d);
-    for (auto const & kv : pinned) cudaHostUnregister((void *) kv.first);
+    /* g_pool / g_pinned are process-global (shared across sibling-thread mm's);
+     * they are freed at process exit rather than per-mm. */
 }
 
 // NOLINTNEXTLINE(misc-use-internal-linkage)
