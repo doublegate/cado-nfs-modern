@@ -132,11 +132,11 @@ class Cado_NFS_toplevel(object):
 
         >>> t.args.N = n16
         >>> t.args.computation = Computation.FACT
-        >>> t.find_default_parameter_file()  # doctest: +ELLIPSIS
-        Traceback (most recent call last):
-            ...
-        RuntimeError: no parameter file found for c16 (tried ...
-        ...
+        >>> t.logger.setLevel(logging.ERROR)
+        >>> fn = t.find_default_parameter_file()  # interpolates c12 <-> c20
+        >>> os.path.isfile(fn) and os.path.basename(fn).startswith("params.c16.")
+        True
+        >>> os.unlink(fn)
 
         >>> t.args.N = n18
         >>> t.args.computation = Computation.FACT
@@ -158,11 +158,10 @@ class Cado_NFS_toplevel(object):
 
         >>> t.args.N = n16
         >>> t.args.computation = Computation.DLP
-        >>> t.find_default_parameter_file()  # doctest: +ELLIPSIS
-        Traceback (most recent call last):
-            ...
-        RuntimeError: no parameter file found for p16 (tried ...
-        ...
+        >>> fn = t.find_default_parameter_file()  # interpolates p12 <-> p20
+        >>> os.path.isfile(fn) and os.path.basename(fn).startswith("params.p16.")
+        True
+        >>> os.unlink(fn)
 
         >>> t.args.N = n18
         >>> t.args.computation = Computation.DLP
@@ -187,11 +186,10 @@ class Cado_NFS_toplevel(object):
         >>> t.args.N = n16
         >>> t.args.computation = Computation.CL
         >>> t.args.algo = Algorithm.QS
-        >>> t.find_default_parameter_file()  # doctest: +ELLIPSIS
-        Traceback (most recent call last):
-            ...
-        RuntimeError: no parameter file found for qs.d16 (tried ...
-        ...
+        >>> fn = t.find_default_parameter_file()  # interpolates qs.d12 <-> qs.d20
+        >>> os.path.isfile(fn) and os.path.basename(fn).startswith("params.qs.d16.")
+        True
+        >>> os.unlink(fn)
 
         >>> t.args.N = n18
         >>> t.args.computation = Computation.CL
@@ -247,9 +245,142 @@ class Cado_NFS_toplevel(object):
                 paramfile = os.path.join(default_param_dir, "params." + f)
                 self.logger.info("Using default parameter file %s" % paramfile)
                 return paramfile
+        # No preset within the +/-k window. Rather than give up, interpolate a
+        # parameter file from the two nearest presets that bracket this size
+        # (Track 3.3). attempts[0] is the basename for size_of_n (e.g. "c100",
+        # "p100", "qs.d100", "p2dd100"); strip the trailing size to get the stem.
+        base = attempts[0]
+        suffix = "%d" % size_of_n
+        stem = base[:-len(suffix)] if base.endswith(suffix) else base
+        interpolated = self._interpolate_parameter_file(default_param_dir, stem,
+                                                        size_of_n)
+        if interpolated is not None:
+            return interpolated
         raise RuntimeError("no parameter file found for %s (tried %s)\n"
                            "Feel free to submit one!"
                            % (attempts[0], ", ".join(attempts)))
+
+    @staticmethod
+    def _read_param_values(path):
+        '''Parse a parameter file's `key = value` lines (ignoring comments and
+        any inline trailing comment) into a dict {key: value-string}.'''
+        d = {}
+        kv = re.compile(r"^\s*([\w.]+)\s*=\s*(.*?)\s*(?:#.*)?$")
+        try:
+            with open(path) as f:
+                for line in f:
+                    if line.lstrip().startswith("#"):
+                        continue
+                    m = kv.match(line)
+                    if m and m.group(2) != "":
+                        d[m.group(1)] = m.group(2)
+        except OSError:
+            pass
+        return d
+
+    @staticmethod
+    def _interp_value(lo_val, hi_val, t):
+        '''Interpolate two numeric parameter values at fraction t in [0, 1].
+        Returns a string, or None if either side is non-numeric (the caller then
+        keeps the template's value verbatim). Integer pairs stay integer.'''
+        def parse(s):
+            s = s.strip()
+            try:
+                return ("int", int(s))
+            except ValueError:
+                pass
+            try:
+                return ("float", float(s))
+            except ValueError:
+                return (None, None)
+        lk, lv = parse(lo_val)
+        hk, hv = parse(hi_val)
+        if lk is None or hk is None:
+            return None
+        v = lv + t * (hv - lv)
+        if lk == "int" and hk == "int":
+            return "%d" % int(round(v))
+        return ("%.4f" % v).rstrip("0").rstrip(".")
+
+    def _interpolate_parameter_file(self, param_dir, stem, size):
+        '''When no preset matches `size`, synthesise one. If two presets bracket
+        `size`, interpolate their numeric values (scaling lim*/lpb*/mfb*/I/... by
+        digit count); if `size` is outside the available range, clamp to the
+        nearest single preset. Returns a path to a freshly written file (in the
+        system temp dir), or None if no presets of this kind exist at all. The
+        result is a heuristic — `-p` / `parameters=` overrides it.'''
+        pat = re.compile(r"^params\." + re.escape(stem) + r"(\d+)$")
+        sizes = []
+        try:
+            for fn in os.listdir(param_dir):
+                m = pat.match(fn)
+                if m:
+                    sizes.append(int(m.group(1)))
+        except OSError:
+            return None
+        if not sizes:
+            return None
+        sizes = sorted(set(sizes))
+        below = [s for s in sizes if s < size]
+        above = [s for s in sizes if s > size]
+        lo = max(below) if below else None
+        hi = min(above) if above else None
+        if lo is None or hi is None:
+            # outside the preset range: clamp to the nearest available preset
+            nearest = hi if lo is None else lo
+            src = os.path.join(param_dir, "params.%s%d" % (stem, nearest))
+            self.logger.warning(
+                "No parameter file for %s%d; it is outside the available preset "
+                "range (%s%d..%s%d). Using the nearest preset %s%d unchanged; "
+                "performance may be suboptimal. Override with -p / parameters=."
+                % (stem, size, stem, sizes[0], stem, sizes[-1], stem, nearest))
+            return src
+        lo_params = self._read_param_values(
+                os.path.join(param_dir, "params.%s%d" % (stem, lo)))
+        hi_params = self._read_param_values(
+                os.path.join(param_dir, "params.%s%d" % (stem, hi)))
+        t = (size - lo) / (hi - lo)
+        # template = the nearer preset, so its structure/comments are preserved
+        nearest = lo if (size - lo) <= (hi - size) else hi
+        template = os.path.join(param_dir, "params.%s%d" % (stem, nearest))
+        keyline = re.compile(r"^(\s*)([\w.]+)(\s*=\s*)(.*?)(\s*)$")
+        out_lines = []
+        with open(template) as f:
+            for raw in f:
+                raw = raw.rstrip("\n")
+                stripped = raw.lstrip()
+                if stripped.startswith("#") or not stripped:
+                    out_lines.append(raw)
+                    continue
+                m = keyline.match(raw)
+                if not m:
+                    out_lines.append(raw)
+                    continue
+                indent, key, eq, val, _trail = m.groups()
+                if key == "name":
+                    out_lines.append("%s%s%s%s%d" % (indent, key, eq, stem, size))
+                    continue
+                if key in lo_params and key in hi_params:
+                    iv = self._interp_value(lo_params[key], hi_params[key], t)
+                    if iv is not None:
+                        out_lines.append("%s%s%s%s" % (indent, key, eq, iv))
+                        continue
+                out_lines.append(raw)
+        fd, path = tempfile.mkstemp(prefix="params.%s%d." % (stem, size),
+                                    suffix=".interp")
+        with os.fdopen(fd, "w") as f:
+            f.write("# Auto-interpolated parameters for %s%d (cado-nfs Track 3.3).\n"
+                    % (stem, size))
+            f.write("# Interpolated between %s%d and %s%d (t=%.3f). This is a\n"
+                    "# heuristic; for best performance supply a tuned file"
+                    " with -p.\n\n" % (stem, lo, stem, hi, t))
+            f.write("\n".join(out_lines) + "\n")
+        self.logger.warning(
+            "No exact parameter file for %s%d; using parameters interpolated "
+            "between %s%d and %s%d (wrote %s). This is a heuristic; for best "
+            "performance supply a tuned file with -p / parameters=."
+            % (stem, size, stem, lo, stem, hi, path))
+        return path
 
     @staticmethod
     def number_of_physical_cores():
@@ -726,6 +857,15 @@ class Cado_NFS_toplevel(object):
             if not self.args.parameters:
                 self.args.parameters = self.find_default_parameter_file()
                 self.using_default_parameter_file = True
+            if getattr(self.args, "suggest_params", False):
+                print("# resolved parameter file for N (%d digits): %s"
+                      % (len(repr(abs(self.args.N))), self.args.parameters))
+                try:
+                    with open(self.args.parameters) as pf:
+                        print(pf.read(), end="")
+                except OSError as e:
+                    print("# could not read it: %s" % e)
+                raise SystemExit(0)
             self.parameters.readfile(self.args.parameters)
             # make sure there's no inconsistency with a previously set N,
             # which could be in the parameter file.
@@ -1207,6 +1347,11 @@ class Cado_NFS_toplevel(object):
                             default="DEBUG", metavar="LEVEL")
         parser.add_argument("--parameters", "-p",
                             help="A file with the parameters to use")
+        parser.add_argument("--suggest-params", action="store_true",
+                            help="Resolve the default parameter file for N"
+                                 " (interpolating between the nearest presets if"
+                                 " no exact one exists), print it, and exit"
+                                 " without running the factorization.")
         parser.add_argument(
             "options",
             metavar="OPTION",

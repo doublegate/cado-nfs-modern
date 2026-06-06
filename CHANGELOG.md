@@ -168,6 +168,27 @@ Work in progress — see the v3.1.0 roadmap. Landed so far:
   `verification()` (which already computed achievement + ETA). Off by default; no
   behaviour change unless a flag is given. Validated on a 59-digit factorization.
 
+### UI/UX (Track 3.3) — parameter interpolation
+
+- **Parameter interpolation instead of a hard error.** When no preset parameter
+  file matches the input size (after the existing ±3/±5-digit search window),
+  `find_default_parameter_file` (`toplevel.py`) now **interpolates** a file from
+  the two nearest presets that bracket the size — linearly scaling every numeric
+  key present in both (`lim*`, `lpb*`, `mfb*`, `I`, `qmin`, `ncurves*`,
+  `target_density`, …) by the fractional digit position, rounding integer keys,
+  and preserving the nearer preset's structure/comments. If the size is outside
+  the available preset range it clamps to the nearest single preset. Either way it
+  emits a clear "heuristic; override with `-p`" warning, so off-preset sizes
+  (e.g. a cofactor returned by `--gpu-prefactor`, or any gap such as c45 between
+  the c30 and c60 presets) get usable parameters instead of aborting the run.
+- **`--suggest-params`** resolves the parameter file for `N` (interpolating if
+  needed), prints its path and contents, and exits without factoring — a quick way
+  to inspect or capture a starting point to hand-tune.
+- Validated: `product == N` on a real 45-digit factorization driven entirely by
+  auto-interpolated c30↔c60 parameters; all 299 `toplevel.py` doctests pass
+  (the three that asserted the old "no parameter file found" error now assert the
+  interpolated-file behaviour). No change when an exact/near preset exists.
+
 ### GPU (Track 2.1) — pre-NFS factoring front-end (validated)
 
 - **Multi-precision (K-limb) GPU ECM.** The existing GPU ECM
