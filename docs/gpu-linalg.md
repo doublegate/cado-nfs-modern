@@ -158,13 +158,21 @@ single increment. The honest sequence:
    bit-exact** (`bench/gpu-xdotprod-bench.cu`, ALL PASS) — ready to wire in.
 3. **GPU intra-node reduction/broadcast** for the single-node multi-thread comm
    (the common single-machine case), keeping vectors on-device across the inner
-   loop; sync to host only per-interval (twist/save) and for real MPI.
+   loop; sync to host only per-interval (twist/save) and for real MPI. **Kernels
+   built + validated bit-exact** (`bench/gpu-vecreduce-bench.cu`: GF(2) XOR-reduce
+   + broadcast, ALL PASS, ~440 GB/s) — ready to wire in.
 4. **Multi-node**: GPU-direct (CUDA-aware) MPI, or host-staged exchange.
 
 Approach: each device-side primitive is built and validated **standalone first**
 (no risk to real runs), then wired into the resident loop, with a full verified
-factorization (`product == N`) as the gate at integration. Primitives ready: the
-coalesced SpMV kernel and `x_dotprod`.
+factorization (`product == N`) as the gate at integration. **All three primitives
+are now ready and bit-exact**: the coalesced SpMV kernel, `x_dotprod`, and the
+intra-node reduce/broadcast. The remaining work is the *wiring* — a device-
+resident `mmt_vec` shadow that holds the vectors on the GPU across the inner loop
+and routes the SpMV / dot-product / reduction through the device kernels above,
+syncing host only per-interval (twist/save) and for real MPI. That integration
+(`krylov.cpp` + `matmul_top*.cpp` + the backend, gated by `product == N`) is the
+multi-file core still ahead.
 
 Each step is correctness-gated by a full verified factorization. Until then, the
 backend captures the bounded win (pinning) and is bit-exact.
