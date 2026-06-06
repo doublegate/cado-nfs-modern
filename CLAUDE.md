@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 CADO-NFS is an implementation of the Number Field Sieve (NFS) for integer factorization and discrete logarithms. C (C99) + C++ (**C++20 required** as of 3.0.0) for the core, Python 3 (with **Flask**/requests) for orchestration (`cado-nfs.py`).
 
-**This repo is `doublegate/cado-nfs-3.0.0-modern`** — a modernization + performance fork of upstream [CADO-NFS](https://gitlab.inria.fr/cado-nfs/cado-nfs) 3.0.0 (LGPL-2.1). Internal version is **`3.0.0-modern`** (`CMakeLists.txt`). The upstream NFS algorithms/parameters are unchanged; this fork rebases onto current toolchains and adds measured build/SIMD/GPU/Rust-orchestration work. See `CHANGELOG.md` for the full patch list, `README.md` for attribution, and `docs/` for the deep-dives. The earlier 2.3.0-based release (`2.3.1-modern`) is preserved under the `v2.3.1-modern` tag.
+**This repo is `doublegate/cado-nfs-modern`** (renamed 2026-06-06 from `cado-nfs-3.0.0-modern`; GitHub auto-redirects the old URL) — a modernization + performance fork of upstream [CADO-NFS](https://gitlab.inria.fr/cado-nfs/cado-nfs) 3.0.0 (LGPL-2.1). Internal version is **`3.1.0-modern`** (`CMakeLists.txt`: numeric `3.1.0` + `-modern` suffix — the fork now carries its own minor line; upstream NFS algorithms/parameters are unchanged). From 3.1.0 it adds, on top of the 3.0.0-modern build/SIMD/GPU-cofactor/Rust tracks, **GPU linear algebra** (BWC SpMV + full vector residency), a **GPU pre-NFS ECM front-end** (`--gpu-prefactor`), **AVX-512 VPCLMULQDQ + IFMA** kernels (SDE-validated), and an expanded **orchestration/UX** layer. `main` tracks the latest release (`v3.1.0-modern`); `v3.0.0-modern` and `v2.3.1-modern` are preserved under their tags. See `CHANGELOG.md` for the full patch list, `README.md` for attribution, and `docs/` for the deep-dives.
 
 ## Build
 
@@ -92,15 +92,25 @@ Optimized for numbers > 85 digits; < 60 digits is unsupported. Strip small prime
 - No `.clang-format` or enforced style exists. Match the style of surrounding code; do not bulk-reformat. (Fork-specific files like `README.md`, `CHANGELOG.md`, `CONTRIBUTING.md`, `docs/*`, `rust/*` were added by this fork.)
 - `-march=native` in the committed `local.sh` is host-specific; for a distributable build, override it in your own `local.sh`.
 
-## This fork: 3.0.0-modern (rebased on upstream 3.0.0)
+## This fork (rebased on upstream 3.0.0)
 
 3.0.0 already subsumes the 2.3.x portability fixes the prior `2.3.1-modern` fork carried (hwloc 2.x, Python 3 stdlib moves, OpenSSL 3.x SSL) and brings, for free, the Bouvier–Imbert batch cofactorization (eprint 2018/669) and `I>16` sieving. What *this* fork adds on top, validated and measured (full detail in `CHANGELOG.md`):
 
+**3.0.0-modern tracks (foundation):**
+
 - **Build (Phase 1):** `local.sh` sets `-O3 -march=native` (the only real CPU win — LTO/PGO were measured and rejected). Builds on CMake 4.x / GCC 16 / Python 3.14.
 - **SIMD (Phase 2):** AVX2 on the siever was ruled out by profiling; an AVX-512 VPCLMULQDQ gf2x base-case kernel is validated bit-exact under Intel SDE (perf-gated on real AVX-512 silicon). See `gf2x/already_tuned/x86_64_vpclmul/`.
-- **GPU (Phase 3):** a complete batched ECM cofactorization backend (`sieve/ecm/gpu/`, CMake CUDA), validated bit-exact vs the CPU path. Honest finding: cofactorization is Amdahl-bounded (~8% of siever time) → **no net single-machine speedup** at these sizes. See `docs/gpu-cofactorization.md`.
+- **GPU cofactorization (Phase 3):** a complete batched ECM cofactorization backend (`sieve/ecm/gpu/`, CMake CUDA), validated bit-exact vs the CPU path. Honest finding: cofactorization is Amdahl-bounded (~8% of siever time) → **no net single-machine speedup** at these sizes. See `docs/gpu-cofactorization.md`.
 - **Rust orchestration (Phase 4):** the `rust/` workspace — `cado-nfs-client-rs` (static-binary work-unit client) and `cado-wu-server-rs` (async axum/tokio server over the same `wudb` SQLite schema). Keeps the exact HTTP/JSON protocol, so it interoperates with an unmodified `cado-nfs.py`. The Rust server can be **swapped in** for the Flask `api_server.py` in a live run by setting `CADO_RUST_WU_SERVER=<path to cado-wu-server-rs>` (a Python shim, `scripts/cadofactor/external_api_server.py`, launches it; `cadotask.py` switches to it). TLS + IP whitelist + cert-pinning all work through the swap. `cadotask.py` (the high-level task DAG) is deliberately left in Python. See `docs/rust-orchestration.md` and the `rust/*-test.sh` validators.
-- **Versioning:** `CADO_VERSION_STRING` is `3.0.0-modern` via a `-modern` suffix in `CMakeLists.txt`; numeric components stay at upstream 3.0.0, no test depends on the string.
+
+**3.1.0-modern additions (every shipped change gated by `product == N` or a bit-exact validation; HW-blocked items are documented designs, not committed unvalidated code):**
+
+- **GPU linear algebra:** a real `mm_impl=gpu` BWC SpMV backend (`linalg/bwc/matmul-gpu.cu`, b64/b128) with M+Mᵀ resident as CSR, a coalesced warp-per-row kernel, and **full vector residency** — the steady krylov/mksol/secure loop runs entirely on device buffers (2D comm + GPU `x_dotprod` + device `addmul_tiny` ported). Env: `CADO_GPU_VECRESIDENT=1 CADO_GPU_DEVCOMM=1`. The win grows with N (~7.9 Gnz/s at c120-scale, ~4.4× the tuned `bucket`). Intra-node multi-GPU partition via `CADO_GPU_NPART` (default 1; validated at N=1, true multi-GPU HW-gated); multi-node residency is a documented design. See `docs/gpu-linalg.md`. Hook definitions live in `linalg/bwc/matmul-gpu-hooks.cpp` (in `matmul_common`, so `bench_matcache --impl gpu` links).
+- **GPU pre-NFS factoring:** `cado-nfs.py --gpu-prefactor` (`misc/gpu_prefactor/`, `scripts/cadofactor/gpu_prefactor.py`) strips factors with batched multi-precision GPU ECM before NFS — a separate stage with no Amdahl ceiling (~49×/26×/12× the full CPU at 128/256/512-bit). See `docs/gpu-prefactor.md`.
+- **AVX-512 (correctness-only, CI-gated under SDE):** gf2x VPCLMULQDQ auto-detection (`gf2x/config/features.m4` `CHECK_VPCLMUL_SUPPORT`, run-test-gated so non-AVX-512 hosts keep pclmul — safe) and an IFMA GF(p) Montgomery modmul kernel (`bench/ifma-modmul.c`). Both bit-exact under Intel SDE (`bench/{vpclmul,ifma}-validate.sh`; SDE at `/opt/intel-sde/sde64`), gated by `.github/workflows/avx512-validate.yml`.
+- **Orchestration/UX:** parameter interpolation + `--suggest-params` (`toplevel.py`); `--json-status`/`--progress` (`status.py`) + `GET /status` & `/dashboard` on both servers; `clap` CLIs for the Rust binaries; `scripts/cluster-launch.sh` (SSH/Slurm); `cado-nfs-monitor-rs` (ratatui).
+- **Honest negatives (measured, recorded):** siever-trained PGO retry (+3%, rejected); no safe hot-scalar micro-opt (hot loops already SIMD/unrolled/prefetched).
+- **Versioning:** `CADO_VERSION_STRING` is `3.1.0-modern` (`CMakeLists.txt`: `CADO_VERSION_MINOR 1` + `-modern` suffix). The numeric minor now **deliberately diverges** from upstream 3.0.0 to mark the fork's substantial original work; no test depends on the string.
 
 ### Docs
 

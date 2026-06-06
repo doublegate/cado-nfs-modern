@@ -103,20 +103,23 @@ was verified (factors multiply back to the input and are prime).
 
 | Digits | Bits | Wall time | CADO CPU | Parallel | vs 2.3.1-modern (CPU) |
 |-------:|-----:|----------:|---------:|---------:|----------------------:|
-| 60 | ~199 | 19.2 s | 40.0 s | 2.1× | −31 % |
-| 70 | ~232 | 26.0 s | 87.5 s | 3.4× | −28 % |
-| 80 | ~265 | 70.3 s | 379.1 s | 5.4× | −32 % |
-| 90 | ~299 | 184.5 s | 1465.0 s | 8.0× | −25 % |
+| 60 | ~199 | 18.5 s | 31.1 s | 1.7× | −46 % |
+| 70 | ~232 | 27.2 s | 108.5 s | 4.1× | −11 % |
+| 80 | ~265 | 74.4 s | 406.0 s | 5.5× | −27 % |
+| 90 | ~299 | 197.9 s | 1604.2 s | 8.1× | −17 % |
+
+(Re-measured 2026-06-06 on 3.1.0-modern; 3.1.0 adds no CPU-path change, so these
+match the 3.0.0-modern line within run-to-run variance.)
 
 **Key findings**
 
-- **Total CPU work is down ~25-32 %** versus the 2.3.0-based fork on identical
-  inputs — mostly from upstream 3.0.0's Bouvier–Imbert batch cofactorization
-  (eprint 2018/669) and `I>16` sieving, compounded by this fork's
-  `-O3 -march=native` (~7 % on the siever). This is the robust, repeatable
-  signal; wall-time gains shrink with size and fall inside the ±15-20 %
-  polynomial-selection noise by c90.
-- **Parallel efficiency *drops* (e.g. c90 11.1×→8.0×) as a consequence of the
+- **Total CPU work is down (~25-32 % typical; −11 to −46 % this run)** versus the
+  2.3.0-based fork on identical inputs — mostly from upstream 3.0.0's
+  Bouvier–Imbert batch cofactorization (eprint 2018/669) and `I>16` sieving,
+  compounded by this fork's `-O3 -march=native` (~7 % on the siever; the
+  deterministic siever microbench is **11.67 s**). The per-run spread is
+  polyselect/merge variance; the CPU reduction is the robust, repeatable signal.
+- **Parallel efficiency *drops* (e.g. c90 11.1×→8.1×) as a consequence of the
   CPU reduction**, not a regression: with less embarrassingly-parallel sieve
   work, the sequential phases (linear algebra, square root, orchestration)
   become a larger fraction of the run.
@@ -128,13 +131,14 @@ was verified (factors multiply back to the input and are prime).
   minutes · ~c100 ≈ 10 min · ~c110 ≈ 1 hr · ≥c130 wants distributed mode.
 
 **GPU (3.1.0-modern, RTX 3090).** The GPU pre-factoring ECM front-end runs
-**~49× / 26× / 12×** the full 20-thread CPU at 128/256/512-bit moduli, and the
-GPU BWC SpMV holds **~7.9 Gnz/s at c120-scale (240 M nonzeros, bit-exact)** —
-~4.4× the tuned CPU `bucket` backend, with the advantage **widening as the matrix
-grows** (the CPU loop is memory-bound; this is where large-N linear algebra
-lives). Full vector residency removes the per-iteration PCIe transfers in the
-steady krylov loop. These are GPU-build (`-DENABLE_GPU=ON`) results; the CPU
-table above is the default build.
+**48.7× / 25.4× / 10.5×** the full 20-thread CPU at 128/256/512-bit moduli, and
+the GPU BWC SpMV holds **8.1 Gnz/s at c120-scale (240 M nonzeros, bit-exact)** —
+~4.5× the tuned CPU `bucket` backend (saturated at ~1.8 Gnz/s), with the advantage
+**widening as the matrix grows** (the CPU loop is memory-bound; this is where
+large-N linear algebra lives). Full vector residency removes the per-iteration
+PCIe transfers in the steady krylov loop (end-to-end c90 `product == N`, bwc
+8.18 s). AVX-512 VPCLMULQDQ + IFMA kernels are bit-exact under Intel SDE. These
+are GPU-build (`-DENABLE_GPU=ON`) results; the CPU table above is the default build.
 
 Full methodology, per-phase breakdown, the 2.3.1→3.0.0 comparison, the GPU
 sweeps, projections, and seeded reproducible inputs:

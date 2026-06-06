@@ -29,6 +29,16 @@ Post-`3.1.0-modern` housekeeping (no code/behaviour change):
   (`gpu-prefactor`, `ifma-modmul`, `gpu-spmv-bench`, …), PGO/profiling artifacts
   (`*.gcda`/`*.gcno`/`*.profraw`/`perf.data`), `--json-status` snapshots,
   `autom4te.cache/`, and editor/OS cruft.
+- **`BENCHMARKS.md` re-run and reorganized for 3.1.0-modern** (all numbers
+  re-measured 2026-06-06 on the i9-10850K + RTX 3090). Restructured into six
+  consistent sections — CPU factorization (seeded c60-c90 sweep + per-phase + the
+  2.3.x comparison + projections, all `product == N`), the deterministic siever
+  microbench (11.67 s, confirming no 3.1.0 CPU-path change), GPU pre-factoring ECM
+  (48.7×/25.4×/10.5×), GPU linear algebra (SpMV scaling sweep 30.6→8.1 Gnz/s
+  c100→c120 vs CPU 2.25→0.23, + the end-to-end c90 residency anchor, bwc 8.18 s),
+  AVX-512 kernels (VPCLMUL `mul1` + IFMA modmul bit-exact under SDE), and a unified
+  Reproducing section. README Performance table + GPU note synced to the same
+  figures. `CLAUDE.md` updated for the rename + current 3.1.0 state.
 
 ## [3.1.0-modern] — 2026-06-06
 
