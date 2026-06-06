@@ -89,30 +89,51 @@ path below) — but even on one desktop the kernel is ~4× the tuned CPU backend
 - **Memory.** The matrix must fit in GPU memory (24 GB on a 3090 → roughly up to
   ~c150-scale); larger needs the multi-GPU/multi-node path below.
 
-## Integration path (next increments)
+## The `matmul_bNN_gpu` backend (implemented + validated)
 
-1. **A `matmul_bNN_gpu` backend** implementing `matmul_interface`
-   (`build_cache`/`reload_cache`/`mul`) behind `matmul_interface::create`
-   (`linalg/bwc/matmul.cpp` dispatch), keeping the CSR matrix **resident on the
-   device** and copying only the `src`/`dst` vectors per iteration (or keeping
-   them resident too and exchanging only across MPI). Selected with
-   `mm_impl=gpu`.
-2. **Bit-exact gate** via the existing `bench_matcache` check
-   ((M·v₁)·v₂ == (Mᵀ·v₂)·v₁) plus a real-matrix run vs `bucket`.
+`linalg/bwc/matmul-gpu.cu` is a real GPU backend plugged into BWC's matmul
+dispatch — selected with `mm_impl=gpu`, registered through the same
+`CONFIGURE_MATMUL_LIB` / `COOKED_BWC_BACKENDS` machinery as `basic`/`bucket`,
+built only with `-DENABLE_GPU=ON` (compiled by nvcc; `b64` and `b128`). It mirrors
+`matmul-basic`'s cache format, keeps **both the matrix and its transpose resident
+on the device as CSR** (so both BWC directions are fast one-thread-per-row
+gathers), and copies only the `src`/`dst` vectors per call.
+
+- **Bit-exact:** passes `bench_matcache`'s consistency check
+  (`(M·v₁)·v₂ == (Mᵀ·v₂)·v₁`) — **all 4 checks pass** for both directions on the
+  real 1M×1M matrix.
+- **Measured (real backend, incl. per-call vector transfers):** **4.95 Gnz/s** on
+  the RTX 3090 — **~8× a single `bucket` thread** and **~2.7× the full-CPU
+  `bucket`** (1.8 Gnz/s). That is *with* the naive per-iteration H2D/D2H copy of
+  `src`/`dst` (~16 MB/iter over PCIe), which is now the bottleneck — the
+  kernel-only ceiling is ~4.4× (above). **Keeping the BWC vectors resident on the
+  device across iterations** (only exchanging across MPI) is the next perf step,
+  toward that ceiling.
+
+## Next increments
+
+1. **Device-resident vectors**: hold the `mmt_vec` data on the GPU across the
+   thousands of SpMV iterations (copy out only for the MPI exchange), removing the
+   per-call transfers — the main remaining single-machine win.
+2. **Kernel tuning**: coalesced/ELL layout, column sorting, shared-memory `src`
+   caching (the kernel realizes only ~10% of peak bandwidth today).
 3. **Multi-GPU / multi-node**: BWC already splits the matrix across an `nh×nv`
-   MPI grid (`balancing_workhorse`), each rank owning a submatrix. The GPU
-   backend slots in at each rank's local `mm->mul()`; one GPU per rank gives
-   multi-GPU on a node and multi-node via the unchanged MPI comm layer — the
-   natural HPC scale-out.
+   MPI grid (`balancing_workhorse`), each rank owning a submatrix; the GPU backend
+   slots in at each rank's local `mm->mul()`. One GPU per rank → multi-GPU on a
+   node and multi-node via the unchanged MPI comm layer — the natural HPC
+   scale-out and where the GPU's aggregate-bandwidth advantage compounds.
 
 ## Status
 
-- **Done & validated:** the GF(2) SpMV GPU kernel (b64/b128/b256), bit-exact vs
-  the CPU reference (`bench/gpu-spmv-bench.cu`); and the honest comparison vs
-  CADO's real `bucket` backend on a real matrix (`bench_matcache`), **including a
-  measured full-CPU threaded scan** — `bucket` saturates at ~1.8 Gnz/s (20
-  threads, bandwidth-bound), so the GPU's **measured single-machine win is ~4.4×**
-  (a floor; the kernel is un-tuned).
-- **Next:** the `matmul_bNN_gpu` backend (resident matrix, coalesced/ELL kernel)
-  + multi-GPU/MPI wiring, where the GPU's largest advantage (aggregate bandwidth
-  at scale, out-of-core matrices) lives.
+- **Done & validated:**
+  - the GF(2) SpMV GPU kernel (b64/b128/b256), bit-exact vs the CPU reference
+    (`bench/gpu-spmv-bench.cu`);
+  - the honest full-CPU baseline — `bucket` saturates at ~1.8 Gnz/s (20 threads,
+    bandwidth-bound), so the kernel-only GPU win is ~4.4×;
+  - **a real `matmul_bNN_gpu` backend** (`linalg/bwc/matmul-gpu.cu`) plugged into
+    BWC's dispatch (`mm_impl=gpu`), passing `bench_matcache`'s bit-exact check
+    (4/4, both directions) and running at **4.95 Gnz/s incl. transfers (~2.7× the
+    full-CPU `bucket`)**.
+- **Next:** device-resident vectors (kill the per-call transfers → toward the
+  ~4.4× ceiling), kernel tuning, then multi-GPU/MPI wiring where the GPU's
+  aggregate-bandwidth advantage at scale lives.

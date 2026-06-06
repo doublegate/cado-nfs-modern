@@ -35,8 +35,18 @@ Work in progress — see the v3.1.0 roadmap. Landed so far:
   below the inflated "6–15× vs naive" but a real single-machine win, and a floor
   (the kernel realizes only ~10% of GPU bandwidth). The GPU's largest advantage
   remains at *scale* (aggregate multi-GPU/multi-node bandwidth, out-of-core
-  matrices). Next: a `matmul_bNN_gpu` backend + multi-GPU via the existing MPI
-  balancing. Full design + measured numbers: `docs/gpu-linalg.md`.
+  matrices). Full design + measured numbers: `docs/gpu-linalg.md`.
+- **A real `matmul_bNN_gpu` BWC backend** (`linalg/bwc/matmul-gpu.cu`) plugged
+  into CADO's matmul dispatch — `mm_impl=gpu`, registered through the same
+  `CONFIGURE_MATMUL_LIB`/`COOKED_BWC_BACKENDS` machinery as `basic`/`bucket`,
+  built (b64+b128) only with `-DENABLE_GPU=ON` (nvcc compiles it with all of
+  CADO's C++20 arith headers). Mirrors `matmul-basic`'s cache format and keeps
+  **both M and Mᵀ resident on-device as CSR** so both BWC directions are fast
+  gathers. **Passes `bench_matcache`'s `(M·v₁)·v₂ == (Mᵀ·v₂)·v₁` check — all 4,
+  both directions — on a real matrix**, and runs at **4.95 Gnz/s including the
+  per-call src/dst transfers (~8× a single `bucket` thread, ~2.7× the full-CPU
+  `bucket`)**. The per-iteration H2D/D2H vector copy is now the bottleneck;
+  device-resident vectors + kernel tuning + multi-GPU/MPI are the next steps.
 
 ### UI/UX (Track 3.1) — run-status reporting
 

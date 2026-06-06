@@ -391,6 +391,26 @@ foreach(v ${internal_arithmetic_backends_gfp})
     endforeach(w)
 endforeach(v)
 
+# GPU GF(2) SpMV backend (v3.1.0-modern, Track 2.2). Built only with the CUDA
+# backend enabled (-DENABLE_GPU=ON, which sets HAVE_GPU_ECM and enables the CUDA
+# language in config/cuda.cmake). Reuses CONFIGURE_MATMUL_LIB (so it registers
+# DO(b64,gpu) etc. in COOKED_BWC_BACKENDS) and then adds CUDA specifics.
+if(HAVE_GPU_ECM)
+    if(NOT DEFINED CADO_GPU_ARCH)
+        set(CADO_GPU_ARCH 86)
+    endif()
+    set(matmul_gpu_sources matmul-gpu.cu)
+    foreach(v b64 b128)
+        CONFIGURE_MATMUL_LIB(${v} gpu)
+        set_target_properties(matmul_${v}_gpu PROPERTIES
+            CUDA_ARCHITECTURES "${CADO_GPU_ARCH}" CUDA_STANDARD 20)
+        # CADO sets no CMAKE_BUILD_TYPE, so default CUDA flags carry no -O3.
+        target_compile_options(matmul_${v}_gpu PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-O3>)
+        target_link_libraries(matmul_${v}_gpu CUDA::cudart)
+        list(APPEND all_matmul_gf2_libs "matmul_${v}_gpu")
+    endforeach()
+endif()
+
 foreach(vw ${BWC_EXTRA_BACKENDS})
     string(REPLACE "+" ";" FOO ${vw})
     list(GET FOO 0 v)
