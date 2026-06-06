@@ -676,7 +676,7 @@ int main(int argc, char const * argv[])
    * A no-op in CPU-only builds; in a -DENABLE_GPU=ON build it installs the device
    * batch root-finder, which polyselect_proots then uses when CADO_GPU_POLYSELECT
    * is set. Left here (before any work) so the hook is ready for the first task. */
-  if (getenv("CADO_GPU_POLYSELECT") != NULL)
+  if (getenv("CADO_GPU_POLYSELECT") != NULL || getenv("CADO_GPU_POLYSELECT_ROOTS") != NULL)
       cado_gpu_polyselect_init();
 
   cxx_param_list pl;

@@ -32,7 +32,25 @@ extern int (*cado_gpu_polyselect_roots)(const uint64_t * a, const uint32_t * p,
                                         unsigned int n, int d,
                                         uint64_t * roots, unsigned int * nr);
 
-/* Install the hook (a no-op in a non-GPU build, where it is defined as a stub).
+/* GPU collision search (v3.2.0-modern, Track C2 continuation). The collision
+ * search is the memory-bound bulk of stage-1 and grows with N. For each prime
+ * primes[i] with nr[i] lifted roots (stored consecutively in roots_flat, entry
+ * order: prime 0's roots, then prime 1's, ...), CADO emits every u == r (mod p^2)
+ * in [-umax, umax) and a collision is two equal u from different primes. This runs
+ * the GPU generate -> sort -> detect-equal pipeline (the validated foundation,
+ * bench/gpu-polyselect-collision.cu) entirely on the device. On success it returns
+ * 1 and points *out_u / *out_p1 / *out_p2 at a thread-local, call-owned buffer of
+ * *out_ncoll collisions (the colliding value u and the two source primes p1,p2),
+ * valid until this thread's next call; the caller forms the polynomials via the
+ * unchanged match path. Returns 0 to fall back to the CPU shash (alloc/launch
+ * failure, or more collisions than the device buffer cap). nent = sum of nr[i]. */
+extern int (*cado_gpu_polyselect_collisions)(
+        const uint32_t * primes, const uint8_t * nr, const int64_t * roots_flat,
+        unsigned int lenPrimes, unsigned int nent, int64_t umax,
+        const uint64_t ** out_u, const uint32_t ** out_p1,
+        const uint32_t ** out_p2, unsigned int * out_ncoll);
+
+/* Install the hooks (a no-op in a non-GPU build, where it is defined as a stub).
  * Called once from polyselect's main when CADO_GPU_POLYSELECT is set. */
 extern void cado_gpu_polyselect_init(void);
 

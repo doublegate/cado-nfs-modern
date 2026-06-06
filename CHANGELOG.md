@@ -134,6 +134,34 @@ validated-at-degenerate-path code + design.
   larger `N` — the documented next step, for which this validated root-finder and
   hook ABI are the foundation. Full analysis in `docs/gpu-polyselect.md`.
 
+### GPU (C2) — live collision-search offload (DONE; correct, size-gated)
+
+- **The collision search now runs on the GPU behind `--gpu-polyselect`.** A second
+  hook (`cado_gpu_polyselect_collisions`, same leaf-TU ABI) installed by
+  `polyselect-gpu.cu` runs the whole-range generate → `thrust::sort_by_key` → detect
+  pipeline on the device (shared, mutex-serialized, persistent buffers) and returns
+  the colliding `(u, p₁, p₂)`. Wired into the **computational** collision pass (`CCS`)
+  in `polyselect_collisions.cpp`: one thread issues the device search over the full
+  prime range and pushes the *same* `polyselect_match_info` jobs as the CPU `shash2`,
+  so `match` and everything downstream are byte-identical. The cheap **decisional**
+  pass (`DCS`, run per special-q) stays on CPU.
+- **Size-gated, so no regression.** The GPU path engages only when the estimated
+  u-count (`Σ nrᵢ·2·umax/pᵢ²`) clears ~4 M; below that the unchanged CPU `shash`
+  runs. At the c59–c90 sizes testable here (a few thousand u) it is a no-op; it
+  engages at large N where the collision search dominates stage-1. The measured-
+  negative GPU root-finder was **split off** to a separate opt-in
+  (`CADO_GPU_POLYSELECT_ROOTS`) so it no longer rides along with `--gpu-polyselect`.
+  (`CADO_GPU_POLYSELECT_FORCE` overrides the gate for testing.)
+- **Validated.** Forcing the gate on at c59 exercised the device path **203×, 0
+  fallbacks**, polynomial set **byte-identical** to CPU (66 = 66); **end-to-end
+  `product == N`** with GPU collisions forced; all 32 `polyselect` ctests pass on the
+  default CPU path. Enabled-but-gated-off cost is a one-time ~4 s CUDA init (constant
+  vs work size; negligible for a real run). The fixed bug worth noting: the per-prime
+  offset scan over the `uint8_t` `nr` array must accumulate in 32-bit (an explicit
+  `0u` init) — without it the scan overflows at 256, scrambling the expansion into a
+  6.4-trillion-entry garbage workload (OOM / `ppl==0` infinite loop). Full design +
+  results in `docs/gpu-polyselect.md`.
+
 ### GPU (C2) — collision-search offload, foundation kernel (the real win; bit-exact)
 
 - **GPU collision search, validated bit-exact** (`bench/gpu-polyselect-collision.cu`).

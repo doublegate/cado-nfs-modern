@@ -179,15 +179,47 @@ measured during the live integration, exactly as the root-finder's was. What thi
 proves now: the whole collision multiset can be built, sorted, and de-duplicated on
 the device, bit-exactly, at >1 Gu/s with no PCIe traffic for the bulk data.
 
-**Next step — live integration.** Intercept at the dispatch point
-(`polyselect_collisions.cpp`, the `shash2` subtask): when `CADO_GPU_POLYSELECT` is
-set and the hook is installed, run the GPU generate+sort+detect on the thread's
-`(p, r, umax)` instead of `dispatch_to_shash2 + shash2_find_collision`, returning the
-colliding `(u, p₁, p₂)` so the existing `match`/`gmp_match` path forms the polynomial
-unchanged. The candidate set (and therefore Murphy-E and `product == N`) stays
-identical; the win is wall-clock at large `umax`. Fused with the already-shipped GPU
-root-finder, this is the msieve-style "stage-1 resident on the GPU" model, and the
-documented endgame of Track C2.
+**Live integration — DONE (correct, size-gated, validated).** The collision offload
+is wired into CADO's real polyselect behind `--gpu-polyselect` (`CADO_GPU_POLYSELECT`):
+
+- A second hook, `cado_gpu_polyselect_collisions` (same leaf-TU ABI as the
+  root-finder), is installed by `polyselect-gpu.cu`. Given a thread's `(primes, nr,
+  roots, umax)` it runs the whole-range generate → `thrust::sort_by_key` →
+  detect pipeline on the device (with shared, mutex-serialized, persistent buffers —
+  the GPU is one resource and several team leaders may call at once) and returns the
+  colliding `(u, p₁, p₂)`.
+- The integration point is the **computational** collision pass (`CCS`,
+  `polyselect_collisions.cpp`): when enabled, one thread (`it==0`) runs the device
+  search over the full prime range and pushes the *same* `polyselect_match_info` jobs
+  the CPU `shash2` path would (`match` is byte-identical downstream). The cheap
+  **decisional** pass (`DCS`, run for every special-q, most with no collision) stays
+  on the CPU — offloading it would be pure overhead.
+- **Size gate (the C1-style adaptive dispatch).** The GPU path engages only when the
+  estimated u-count `Σ nrᵢ·2·umax/pᵢ²` clears a threshold (~4 M); below it the
+  unchanged CPU `shash` runs. So at the c59–c90 sizes testable on this box (u-count a
+  few thousand) the path is a **no-op → no regression**, and it engages at large `N`
+  where the collision search is the bulk of stage-1 and the foundation kernel's ~130×
+  applies. (`CADO_GPU_POLYSELECT_FORCE` overrides the gate for testing/power users.)
+- **Separated from the root-finding negative.** `--gpu-polyselect` now enables only
+  the collision offload; the measured-negative GPU root-finder is a distinct opt-in
+  (`CADO_GPU_POLYSELECT_ROOTS`) so it does not drag its slowdown into the beneficial
+  path.
+
+**Validation.** Forcing the gate on at c59 exercised the device path **203 times**
+with **0 fallbacks** and produced a polynomial set **byte-identical** to the CPU
+(66 = 66 polys; also at the `d=4 P=10000` head-to-head); **end-to-end `product == N`**
+with GPU collisions forced on; all 32 `polyselect` ctests pass on the default CPU
+path. The only cost when enabled-but-gated-off is a one-time ~4 s CUDA context init
+(constant regardless of work size — measured +4.0 s at admax 2000 and +4.4 s at
+admax 200000 — negligible for a real multi-minute polyselect run).
+
+**Honest perf scope.** The in-situ wall-clock win is at **large `umax` / large `N`**
+(where the foundation kernel measured ~130× on the collision compute, all device-
+resident); at the small sizes runnable to completion here the gate keeps the work on
+the CPU, so there is nothing to speed up and nothing to regress. Fused with the
+GPU root-finder this is the msieve-style "stage-1 resident on the GPU" model; the
+remaining endgame is keeping the roots on-device between the two so the (p,r) table is
+generated and consumed without any host round-trip.
 
 ## Integration into the collision search (original design notes)
 

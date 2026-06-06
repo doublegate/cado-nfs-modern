@@ -1481,12 +1481,13 @@ class Cado_NFS_toplevel(object):
                             help="GPU ECM curves for --gpu-prefactor")
         parser.add_argument(
             "--gpu-polyselect",
-            help="EXPERIMENTAL: run polynomial-selection root-finding on the "
-                 "GPU (needs a -DENABLE_GPU=ON build). Produces a bit-identical "
-                 "polynomial set, but is currently a net slowdown at these sizes "
-                 "(root-finding is a minority of stage-1 and CADO's CPU d-th-root "
-                 "is already fast); kept for research / larger-N work. See "
-                 "docs/gpu-polyselect.md.",
+            help="EXPERIMENTAL: offload polynomial-selection collision search to "
+                 "the GPU (needs a -DENABLE_GPU=ON build). Produces a bit-identical "
+                 "polynomial set; size-gated so it only engages when the per-q "
+                 "u-count is large enough to beat the CPU (the win grows with N) "
+                 "and is a no-op at small sizes, so no regression. The GPU "
+                 "root-finding path is a separate, measured-negative opt-in via the "
+                 "CADO_GPU_POLYSELECT_ROOTS env. See docs/gpu-polyselect.md.",
             action='store_true')
         parser.add_argument(
             "--dlp-no-keep", "-dlp-no-keep",

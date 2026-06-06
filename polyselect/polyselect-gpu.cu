@@ -21,10 +21,17 @@
 
 #include <cstdio>
 #include <cstdint>
+#include <cstdlib>
+#include <mutex>
 #include <cuda_runtime.h>
+#include <thrust/device_ptr.h>
+#include <thrust/sort.h>
+#include <thrust/scan.h>
+#include <thrust/execution_policy.h>
 
 #include "polyselect-gpu-hooks.h"
 
+typedef uint8_t  u8;
 typedef uint32_t u32;
 typedef uint64_t u64;
 #define D 8                       /* max poly degree we handle (polyselect d <= 7) */
@@ -216,6 +223,211 @@ fail:
     return 0;
 }
 
+/* ===================== GPU collision search (Track C2 cont.) ===================== */
+
+typedef int64_t i64;
+
+/* Per-(prime,root) entry emission count, matching the CADO dispatch loop exactly:
+ *   for (u = u0;       u <  umax;     u += ppl) emit;     // k >= 0
+ *   for (u = u0 - ppl; u + umax >= 0; u -= ppl) emit;     // k >= 1   */
+__host__ __device__ static inline u64 emit_count(i64 u0, i64 ppl, i64 umax)
+{
+    u64 npos = (u0 < umax) ? (u64) ((umax - 1 - u0) / ppl) + 1 : 0;
+    u64 nneg = (u0 + umax >= 0) ? (u64) ((u0 + umax) / ppl) : 0;
+    return npos + nneg;
+}
+
+/* expand prime table -> per-entry (ppl, prime tag); roots_flat is already in entry
+ * order (prime 0's roots, then prime 1's, ...). off[i] = sum_{<i} nr[i]. */
+__global__ void k_expand(const u32 * primes, const u8 * nr, const u32 * off,
+                         u32 lenPrimes, i64 * ent_ppl, u32 * ent_p)
+{
+    u32 i = blockIdx.x * blockDim.x + threadIdx.x; if (i >= lenPrimes) return;
+    i64 pp = (i64) primes[i] * (i64) primes[i];
+    u32 base = off[i], cnt = nr[i];
+    for (u32 j = 0; j < cnt; j++) { ent_ppl[base + j] = pp; ent_p[base + j] = primes[i]; }
+}
+__global__ void k_ccount(const i64 * ent_root, const i64 * ent_ppl, u32 nent,
+                         i64 umax, u64 * cnt)
+{
+    u32 e = blockIdx.x * blockDim.x + threadIdx.x; if (e >= nent) return;
+    cnt[e] = emit_count(ent_root[e], ent_ppl[e], umax);
+}
+__global__ void k_cwrite(const i64 * ent_root, const i64 * ent_ppl, const u32 * ent_p,
+                         u32 nent, i64 umax, const u64 * off, u64 * U, u32 * P)
+{
+    u32 e = blockIdx.x * blockDim.x + threadIdx.x; if (e >= nent) return;
+    i64 u0 = ent_root[e], pp = ent_ppl[e]; u32 tag = ent_p[e]; u64 o = off[e];
+    for (i64 u = u0; u < umax; u += pp) { U[o] = (u64) u; P[o] = tag; o++; }
+    for (i64 u = u0 - pp; u + umax >= 0; u -= pp) { U[o] = (u64) u; P[o] = tag; o++; }
+}
+/* U sorted; one thread per run-start emits ALL pairs in the run (matches the CPU
+ * shash, which collides each element with every earlier equal one). Runs of length
+ * >2 are astronomically rare, but handled for bit-exactness. */
+__global__ void k_cdetect(const u64 * U, const u32 * P, u64 m, u32 cap,
+                          u64 * oU, u32 * oP1, u32 * oP2, u32 * ncoll)
+{
+    u64 t = (u64) blockIdx.x * blockDim.x + threadIdx.x; if (t >= m) return;
+    if (t > 0 && U[t - 1] == U[t]) return;          /* not a run start */
+    u64 e = t + 1; while (e < m && U[e] == U[t]) e++;
+    for (u64 a = t; a < e; a++)
+        for (u64 b = a + 1; b < e; b++) {
+            if (P[a] == P[b]) continue;             /* same prime cannot truly collide */
+            u32 idx = atomicAdd(ncoll, 1u);
+            if (idx < cap) {
+                oU[idx] = U[a];
+                oP1[idx] = P[a] < P[b] ? P[a] : P[b];
+                oP2[idx] = P[a] < P[b] ? P[b] : P[a];
+            }
+        }
+}
+
+struct CollBufs {
+    u32 ecap = 0;                         /* entry-array capacity */
+    u64 ucap = 0;                         /* u-array capacity */
+    u32 ccap = 0;                         /* collision-output capacity */
+    i64 *d_root = nullptr, *d_ppl = nullptr; u32 *d_p = nullptr;
+    u8 *d_nr = nullptr; u32 *d_primes = nullptr, *d_off32 = nullptr; u64 *d_cnt = nullptr, *d_off = nullptr;
+    u64 *d_U = nullptr; u32 *d_P = nullptr;
+    u64 *d_oU = nullptr; u32 *d_oP1 = nullptr, *d_oP2 = nullptr, *d_ncoll = nullptr;
+    u64 *h_oU = nullptr; u32 *h_oP1 = nullptr, *h_oP2 = nullptr;
+
+    bool ensure_entries(u32 lenPrimes, u32 nent) {
+        if (nent <= ecap && lenPrimes <= ecap) return true;
+        u32 c = lenPrimes > nent ? lenPrimes : nent; if (c < 1) c = 1;
+        if (d_root) { cudaFree(d_root); cudaFree(d_ppl); cudaFree(d_p); cudaFree(d_nr);
+                      cudaFree(d_primes); cudaFree(d_off32); cudaFree(d_cnt); cudaFree(d_off); }
+        d_root = nullptr;
+        if (cudaMalloc(&d_root, (size_t) c * 8)) return false;
+        if (cudaMalloc(&d_ppl, (size_t) c * 8)) return false;
+        if (cudaMalloc(&d_p, (size_t) c * 4)) return false;
+        if (cudaMalloc(&d_nr, (size_t) c)) return false;
+        if (cudaMalloc(&d_primes, (size_t) c * 4)) return false;
+        if (cudaMalloc(&d_off32, (size_t) c * 4)) return false;
+        if (cudaMalloc(&d_cnt, (size_t) c * 8)) return false;
+        if (cudaMalloc(&d_off, (size_t) (c + 1) * 8)) return false;
+        ecap = c; return true;
+    }
+    bool ensure_u(u64 total) {
+        if (total <= ucap) return true;
+        if (d_U) { cudaFree(d_U); cudaFree(d_P); }
+        d_U = nullptr;
+        if (cudaMalloc(&d_U, total * 8)) return false;
+        if (cudaMalloc(&d_P, total * 4)) return false;
+        ucap = total; return true;
+    }
+    bool ensure_coll(u32 cap) {
+        if (cap <= ccap) return true;
+        if (d_oU) { cudaFree(d_oU); cudaFree(d_oP1); cudaFree(d_oP2);
+                    cudaFreeHost(h_oU); cudaFreeHost(h_oP1); cudaFreeHost(h_oP2); }
+        d_oU = nullptr;
+        if (cudaMalloc(&d_oU, (size_t) cap * 8)) return false;
+        if (cudaMalloc(&d_oP1, (size_t) cap * 4)) return false;
+        if (cudaMalloc(&d_oP2, (size_t) cap * 4)) return false;
+        if (!d_ncoll && cudaMalloc(&d_ncoll, 4)) return false;
+        if (cudaMallocHost(&h_oU, (size_t) cap * 8)) return false;
+        if (cudaMallocHost(&h_oP1, (size_t) cap * 4)) return false;
+        if (cudaMallocHost(&h_oP2, (size_t) cap * 4)) return false;
+        ccap = cap; return true;
+    }
+};
+/* The GPU is a shared resource and polyselect may call this from several team
+ * leaders at once; serialize device work with a global mutex (each call is short).
+ * Because the mutex makes collision work strictly single-threaded-at-a-time, the
+ * device buffers are SHARED (not thread_local) — one set, reused across all teams,
+ * so the multi-GB u-array is allocated 1x rather than once per team (which OOMed),
+ * and thrust never runs from two threads at once. Per-stream concurrency with
+ * per-thread buffers is a possible future optimization. */
+CollBufs g_cbufs;
+std::mutex g_coll_mutex;
+
+#define COLL_CAP (1u << 18)               /* max collisions returned before CPU fallback */
+
+int gpu_polyselect_collisions_impl(
+        const u32 * primes, const u8 * nr, const i64 * roots_flat,
+        u32 lenPrimes, u32 nent, i64 umax,
+        const u64 ** out_u, const u32 ** out_p1, const u32 ** out_p2, u32 * out_ncoll)
+{
+    if (lenPrimes == 0 || nent == 0) { *out_ncoll = 0; return 1; }
+    std::lock_guard<std::mutex> lock(g_coll_mutex);
+    /* Each polyselect worker thread that reaches here must have device 0 current;
+     * raw cudaMalloc auto-selects it, but thrust's execution policy needs it set
+     * explicitly (else exclusive_scan throws cudaErrorInvalidDevice). */
+    if (cudaSetDevice(0) != cudaSuccess) return 0;
+    CollBufs & B = g_cbufs;
+    if (!B.ensure_entries(lenPrimes, nent) || !B.ensure_coll(COLL_CAP)) return 0;
+
+    cudaError_t e = cudaSuccess;
+  try {
+    e = cudaMemcpy(B.d_primes, primes, (size_t) lenPrimes * 4, cudaMemcpyHostToDevice); if (e) goto fail;
+    e = cudaMemcpy(B.d_nr, nr, (size_t) lenPrimes, cudaMemcpyHostToDevice); if (e) goto fail;
+    e = cudaMemcpy(B.d_root, roots_flat, (size_t) nent * 8, cudaMemcpyHostToDevice); if (e) goto fail;
+
+    {
+        int tpb = 128;
+        /* per-prime offsets into the entry arrays (exclusive scan of nr). NOTE: nr
+         * is uint8_t, so the scan MUST accumulate in a wider type -- pass an
+         * unsigned init so the accumulator is 32-bit, else it overflows at 256 and
+         * the offsets (hence the whole expansion) are garbage. */
+        thrust::device_ptr<u8> nrp(B.d_nr);
+        thrust::device_ptr<u32> offp(B.d_off32);
+        thrust::exclusive_scan(thrust::device, nrp, nrp + lenPrimes, offp, (unsigned int) 0);
+        k_expand<<<(lenPrimes + tpb - 1) / tpb, tpb>>>(B.d_primes, B.d_nr, B.d_off32,
+                lenPrimes, B.d_ppl, B.d_p);
+        e = cudaGetLastError(); if (e) goto fail;
+
+        /* per-entry emission counts -> exclusive scan -> total */
+        k_ccount<<<(nent + tpb - 1) / tpb, tpb>>>(B.d_root, B.d_ppl, nent, umax, B.d_cnt);
+        e = cudaGetLastError(); if (e) goto fail;
+        thrust::device_ptr<u64> cntp(B.d_cnt), offu(B.d_off);
+        thrust::exclusive_scan(thrust::device, cntp, cntp + nent, offu);
+        u64 total = 0, last_off = 0, last_cnt = 0;
+        e = cudaMemcpy(&last_off, B.d_off + (nent - 1), 8, cudaMemcpyDeviceToHost); if (e) goto fail;
+        e = cudaMemcpy(&last_cnt, B.d_cnt + (nent - 1), 8, cudaMemcpyDeviceToHost); if (e) goto fail;
+        total = last_off + last_cnt;
+        if (getenv("CADO_GPU_POLYSELECT_DEBUG"))
+            fprintf(stderr, "polyselect GPU coll: lenPrimes=%u nent=%u umax=%lld total_u=%llu\n",
+                    lenPrimes, nent, (long long) umax, (unsigned long long) total);
+        if (total == 0) { *out_ncoll = 0; return 1; }
+        if (!B.ensure_u(total)) goto fail;
+
+        k_cwrite<<<(nent + tpb - 1) / tpb, tpb>>>(B.d_root, B.d_ppl, B.d_p, nent, umax,
+                B.d_off, B.d_U, B.d_P);
+        e = cudaGetLastError(); if (e) goto fail;
+
+        /* sort u-values, carrying the prime tag, then detect collisions */
+        thrust::device_ptr<u64> Up(B.d_U); thrust::device_ptr<u32> Pp(B.d_P);
+        thrust::sort_by_key(thrust::device, Up, Up + total, Pp);
+        e = cudaMemset(B.d_ncoll, 0, 4); if (e) goto fail;
+        u64 mblk = (total + tpb - 1) / tpb;
+        k_cdetect<<<(u32) mblk, tpb>>>(B.d_U, B.d_P, total, COLL_CAP,
+                B.d_oU, B.d_oP1, B.d_oP2, B.d_ncoll);
+        e = cudaGetLastError(); if (e) goto fail;
+
+        u32 nc = 0;
+        e = cudaMemcpy(&nc, B.d_ncoll, 4, cudaMemcpyDeviceToHost); if (e) goto fail;
+        if (nc > COLL_CAP) {       /* overflow: too many collisions, let the CPU do it */
+            fprintf(stderr, "polyselect GPU: %u collisions exceed cap %u; CPU fallback\n", nc, COLL_CAP);
+            return 0;
+        }
+        e = cudaMemcpy(B.h_oU, B.d_oU, (size_t) nc * 8, cudaMemcpyDeviceToHost); if (e) goto fail;
+        e = cudaMemcpy(B.h_oP1, B.d_oP1, (size_t) nc * 4, cudaMemcpyDeviceToHost); if (e) goto fail;
+        e = cudaMemcpy(B.h_oP2, B.d_oP2, (size_t) nc * 4, cudaMemcpyDeviceToHost); if (e) goto fail;
+        *out_u = B.h_oU; *out_p1 = B.h_oP1; *out_p2 = B.h_oP2; *out_ncoll = nc;
+    }
+    return 1;
+  } catch (const std::exception & ex) {
+    fprintf(stderr, "polyselect GPU: thrust error (%s); falling back to CPU collision search\n",
+            ex.what());
+    return 0;
+  }
+
+fail:
+    fprintf(stderr, "polyselect GPU: %s; falling back to CPU collision search\n",
+            cudaGetErrorString(e));
+    return 0;
+}
+
 } // namespace
 
 void cado_gpu_polyselect_init(void)
@@ -226,4 +438,5 @@ void cado_gpu_polyselect_init(void)
         return;
     }
     cado_gpu_polyselect_roots = gpu_polyselect_roots_impl;
+    cado_gpu_polyselect_collisions = gpu_polyselect_collisions_impl;
 }

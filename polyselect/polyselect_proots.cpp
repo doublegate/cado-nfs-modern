@@ -202,14 +202,15 @@ void polyselect_proots_compute_subtask(polyselect_thread_ptr thread)/*{{{*/
 
     /* GPU root-finding path (v3.2.0-modern, Track C2): compute this thread's whole
      * prime range [i0,i1) in one device launch, solving x^d == (Ntilde mod p_i)
-     * (mod p_i) for every prime at once -- the per-prime root step that dominates
-     * stage-1. Gated on CADO_GPU_POLYSELECT *and* a GPU backend having installed
-     * the hook (polyselect-gpu.cu under -DENABLE_GPU=ON); otherwise the per-prime
-     * CPU loop below runs unchanged. The returned root SET matches
-     * roots_mod_uint64, so roots_lift + polyselect_proots_add are identical; the
-     * device call returns 0 (fall back to CPU) on any allocation/launch failure. */
+     * (mod p_i) for every prime at once. The root SET matches roots_mod_uint64
+     * (validated bit-exact), but this is a MEASURED NET SLOWDOWN at the sizes
+     * testable on this box (Amdahl: root-finding is a minority of stage-1, and the
+     * CPU d-th-root is already fast), so it is gated on a SEPARATE opt-in env
+     * CADO_GPU_POLYSELECT_ROOTS -- it does NOT ride along with --gpu-polyselect
+     * (which enables the beneficial, size-gated collision offload). Kept for
+     * research / larger-N work. Returns 0 (CPU fallback) on any failure. */
     int gpu_done = 0;
-    if (cado_gpu_polyselect_roots != NULL && getenv("CADO_GPU_POLYSELECT") != NULL
+    if (cado_gpu_polyselect_roots != NULL && getenv("CADO_GPU_POLYSELECT_ROOTS") != NULL
         && i1 > i0) {
         unsigned int nb = (unsigned int) (i1 - i0);
         uint64_t * abuf = (uint64_t *) malloc((size_t) nb * sizeof(uint64_t));

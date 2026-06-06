@@ -21,3 +21,9 @@
 int (*cado_gpu_polyselect_roots)(const uint64_t *, const uint32_t *,
                                  unsigned int, int,
                                  uint64_t *, unsigned int *) = nullptr;
+
+int (*cado_gpu_polyselect_collisions)(
+        const uint32_t *, const uint8_t *, const int64_t *,
+        unsigned int, unsigned int, int64_t,
+        const uint64_t **, const uint32_t **,
+        const uint32_t **, unsigned int *) = nullptr;

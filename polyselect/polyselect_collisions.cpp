@@ -25,10 +25,111 @@
 #include "portability.h"
 #include "timing.h"
 #include "misc.h"
+#include "dllist.h"
+#include "polyselect_match.hpp"
+#include "polyselect-gpu-hooks.h"
+
+#include <vector>
 
 /* CCS = computational collision search
  * DCS = decisional collision search
  */
+
+/* GPU collision search (v3.2.0-modern, Track C2 continuation).
+ *
+ * The collision search is the memory-bound bulk of polyselect stage-1 and grows
+ * with N. When CADO_GPU_POLYSELECT is set and the GPU backend installed the hook,
+ * we run the WHOLE prime range's search on the device in one shot (generate every
+ * u == r (mod p^2) in [-umax,umax) -> sort -> detect equal u from different primes),
+ * instead of the CPU dispatch-to-shash + transversal scan. Only one thread of the
+ * team (it==0) issues it; the GPU parallelizes internally, so there is no need to
+ * split the range across the CPU team. The candidate set (hence Murphy-E and
+ * product==N) is identical -- the returned collisions feed the unchanged match path.
+ *
+ * roots_flat holds the lifted roots in ENTRY order (prime 0's nr[0] roots, then
+ * prime 1's, ...), nent = sum of nr[i]; this matches both the flat layout
+ * (invq_roots_per_prime) and a gather of the notflat R->roots[i][j].
+ *
+ * Returns 1 if handled (decisional: *found set iff any collision; computational:
+ * a match job pushed per collision), 0 to fall back to the CPU shash path. */
+static int polyselect_gpu_collisions_try(
+        polyselect_thread_ptr thread,
+        const uint32_t * primes, const uint8_t * nr, const int64_t * roots_flat,
+        unsigned int lenPrimes, unsigned int nent, int64_t umax,
+        int decisional, unsigned long q, mpz_srcptr rq, int * found)
+{
+    if (cado_gpu_polyselect_collisions == NULL || getenv("CADO_GPU_POLYSELECT") == NULL)
+        return 0;
+    const uint64_t * u = NULL; const uint32_t * p1 = NULL; const uint32_t * p2 = NULL;
+    unsigned int nc = 0;
+    if (!cado_gpu_polyselect_collisions(primes, nr, roots_flat, lenPrimes, nent, umax,
+                                        &u, &p1, &p2, &nc))
+        return 0;
+    if (decisional) { if (nc) *found = 1; return 1; }
+    for (unsigned int c = 0; c < nc; c++) {
+        polyselect_match_info_ptr job;
+        if (dllist_is_empty(&thread->empty_job_slots)) {
+            job = (polyselect_match_info_s *) malloc(sizeof(polyselect_match_info_t));
+            polyselect_match_info_init(job, p1[c], p2[c], (int64_t) u[c], q, rq, thread);
+        } else {
+            struct dllist_head * ptr = dllist_get_first_node(&thread->empty_job_slots);
+            dllist_pop(ptr);
+            job = dllist_entry(ptr, struct polyselect_match_info_s, queue);
+            polyselect_match_info_set(job, p1[c], p2[c], (int64_t) u[c], q, rq, thread);
+        }
+        dllist_push_back(&thread->async_jobs, &job->queue);
+    }
+    return 1;
+}
+
+/* Gather the notflat per-prime roots (R->roots[i][j]) into entry order. */
+static unsigned int polyselect_gpu_gather_notflat(
+        const polyselect_proots_srcptr R, unsigned int lenPrimes,
+        std::vector<int64_t> & rf)
+{
+    rf.clear();
+    for (unsigned int i = 0; i < lenPrimes; i++)
+        for (unsigned int j = 0; j < R->nr[i]; j++)
+            rf.push_back((int64_t) R->roots[i][j]);
+    return (unsigned int) rf.size();
+}
+
+/* Is the GPU collision path worth its fixed overhead here? Estimate the number of
+ * emitted u-values = sum_i nr[i] * 2*umax/p_i^2 (the dominant cost). The GPU win
+ * (generate+sort+detect resident on device) only beats the CPU shash once that count
+ * is large; below the threshold the launch+sort-setup+transfer overhead dominates
+ * (measured: a net loss at c59-scale where the count is a few thousand). This makes
+ * the GPU path active at large N -- where the collision search is the bulk of stage-1
+ * and grows -- and a no-op (CPU path) at the small sizes testable on this box, so
+ * there is no regression. The foundation kernel (bench/gpu-polyselect-collision.cu)
+ * shows ~130x at ~45M u-values. */
+static bool polyselect_gpu_collisions_worth_it(
+        const uint32_t * primes, const uint8_t * nr, unsigned int lenPrimes, int64_t umax)
+{
+    if (getenv("CADO_GPU_POLYSELECT_FORCE") != NULL) return true;   /* testing / power-user */
+    const double two_umax = 2.0 * (double) umax;
+    double est = 0.0;
+    for (unsigned int i = 0; i < lenPrimes; i++) {
+        if (!nr[i]) continue;
+        const double pp = (double) primes[i] * (double) primes[i];
+        est += (double) nr[i] * (two_umax / pp);
+        if (est >= 4.0e6) return true;          /* early out once clearly worth it */
+    }
+    return est >= 4.0e6;
+}
+
+/* The flat layout (special-q path) already stores the per-prime adjusted roots in
+ * entry order; copy them to int64 (they are roots mod p^2 < 2^62, so non-negative). */
+static unsigned int polyselect_gpu_gather_flat(
+        const unsigned long * roots, const uint8_t * nr, unsigned int lenPrimes,
+        std::vector<int64_t> & rf)
+{
+    unsigned int nent = 0;
+    for (unsigned int i = 0; i < lenPrimes; i++) nent += nr[i];
+    rf.resize(nent);
+    for (unsigned int c = 0; c < nent; c++) rf[c] = (int64_t) roots[c];
+    return nent;
+}
 
 /*{{{ polyselect_proots_dispatch_to_shash_flat_ugly */
 
@@ -439,6 +540,11 @@ void polyselect_CCS_notflat_subtask(polyselect_thread_ptr thread)
     polyselect_primes_table_srcptr pt = thread->team->league->pt;
 
     polyselect_shash_ptr SH = thread->team->SH[it];
+    const int gpu = (cado_gpu_polyselect_collisions != NULL
+                     && getenv("CADO_GPU_POLYSELECT") != NULL
+                     && polyselect_gpu_collisions_worth_it(pt->Primes, thread->team->R->nr,
+                            (unsigned int) pt->lenPrimes,
+                            polyselect_main_data_get_M(thread->team->league->main)));
 
     polyselect_thread_team_enter_roaming(thread->team, thread);
     pthread_mutex_unlock(&thread->team->lock);
@@ -451,7 +557,7 @@ void polyselect_CCS_notflat_subtask(polyselect_thread_ptr thread)
 
     // reset has been done by the caller with polyselect_shash_reset_multi
     // polyselect_shash_reset(H);
-    {
+    if (!gpu) {
         size_t qt = pt->lenPrimes / nt;
         size_t rt = pt->lenPrimes % nt;
         unsigned long i0 = qt * it + MIN(it, rt);
@@ -462,6 +568,14 @@ void polyselect_CCS_notflat_subtask(polyselect_thread_ptr thread)
                 thread->team->R->roots + i0,
                 thread->team->R->nr + i0,
                 polyselect_main_data_get_M(thread->team->league->main));
+    } else if (it == 0) {
+        std::vector<int64_t> rf;
+        unsigned int nent = polyselect_gpu_gather_notflat(thread->team->R,
+                (unsigned int) pt->lenPrimes, rf);
+        polyselect_gpu_collisions_try(thread, pt->Primes, thread->team->R->nr,
+                rf.data(), (unsigned int) pt->lenPrimes, nent,
+                polyselect_main_data_get_M(thread->team->league->main),
+                /*decisional=*/0, q, rq, NULL);
     }
 
     polyselect_thread_chronogram_chat(thread, "leave p_find_dispatch");
@@ -470,7 +584,7 @@ void polyselect_CCS_notflat_subtask(polyselect_thread_ptr thread)
     // barrier_wait(&thread->team->sync_task->barrier, NULL, NULL, NULL);
 
     polyselect_thread_chronogram_chat(thread, "enter p_find_transverse");
-    {
+    if (!gpu) {
         /* which of the buckets do we have to scan for collisions ? */
         unsigned int wt = polyselect_SHASH_NBUCKETS;
         unsigned int rt = wt % nt;
@@ -511,6 +625,11 @@ void polyselect_DCS_notflat_subtask(polyselect_thread_ptr thread)
     polyselect_thread_team_enter_roaming(thread->team, thread);
     pthread_mutex_unlock(&thread->team->lock);
     /********* BEGIN UNLOCKED SECTION **************/
+    /* The decisional pass stays on the CPU even with the GPU backend: it runs for
+     * every special-q (most have no collision) and the CPU shash is cheap, so a
+     * full GPU generate+sort per sq would be pure overhead. The GPU is used only
+     * for the rarely-run, costly recovery pass (CCS), which regenerates from the
+     * roots and recovers the colliding (u,p1,p2). */
     polyselect_thread_chronogram_chat(thread, "enter p_test_dispatch");
 
 #ifdef DEBUG_POLYSELECT_THREADS
@@ -632,6 +751,7 @@ void polyselect_DCS_flat_subtask(polyselect_thread_ptr thread)
     polyselect_thread_team_enter_roaming(thread->team, thread);
     pthread_mutex_unlock(&thread->team->lock);
     /********* BEGIN UNLOCKED SECTION **************/
+    /* decisional pass stays on CPU (see DCS_notflat); only CCS uses the GPU. */
     polyselect_thread_chronogram_chat(thread, "enter q_test_dispatch");
 
 #ifdef DEBUG_POLYSELECT_THREADS
@@ -705,6 +825,11 @@ void polyselect_CCS_flat_subtask(polyselect_thread_ptr thread)
     polyselect_primes_table_srcptr pt = thread->team->league->pt;
 
     polyselect_shash_ptr SH = thread->team->SH[it];
+    const int gpu = (cado_gpu_polyselect_collisions != NULL
+                     && getenv("CADO_GPU_POLYSELECT") != NULL
+                     && polyselect_gpu_collisions_worth_it(pt->Primes, thread->team->R->nr,
+                            (unsigned int) pt->lenPrimes,
+                            polyselect_main_data_get_M(thread->team->league->main)));
 
     polyselect_thread_team_enter_roaming(thread->team, thread);
     pthread_mutex_unlock(&thread->team->lock);
@@ -717,7 +842,7 @@ void polyselect_CCS_flat_subtask(polyselect_thread_ptr thread)
 
     // reset has been done by the caller with polyselect_shash_reset_multi
     // polyselect_shash_reset(SH);
-    {
+    if (!gpu) {
         size_t qt = pt->lenPrimes / nt;
         size_t rt = pt->lenPrimes % nt;
         unsigned long i0 = qt * it + MIN(it, rt);
@@ -733,6 +858,14 @@ void polyselect_CCS_flat_subtask(polyselect_thread_ptr thread)
                 invq_roots_per_prime + z,
                 thread->team->R->nr + i0,
                 polyselect_main_data_get_M(thread->team->league->main));
+    } else if (it == 0) {
+        std::vector<int64_t> rf;
+        unsigned int nent = polyselect_gpu_gather_flat(invq_roots_per_prime,
+                thread->team->R->nr, (unsigned int) pt->lenPrimes, rf);
+        polyselect_gpu_collisions_try(thread, pt->Primes, thread->team->R->nr,
+                rf.data(), (unsigned int) pt->lenPrimes, nent,
+                polyselect_main_data_get_M(thread->team->league->main),
+                /*decisional=*/0, q, rq, NULL);
     }
 
     polyselect_thread_chronogram_chat(thread, "leave q_find_dispatch");
@@ -741,7 +874,7 @@ void polyselect_CCS_flat_subtask(polyselect_thread_ptr thread)
     // barrier_wait(&thread->team->sync_task->barrier, NULL, NULL, NULL);
 
     polyselect_thread_chronogram_chat(thread, "enter q_find_transverse");
-    {
+    if (!gpu) {
         /* which of the buckets do we have to scan for collisions ? */
         unsigned int wt = polyselect_SHASH_NBUCKETS;
         unsigned int rt = wt % nt;
