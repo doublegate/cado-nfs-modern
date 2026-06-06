@@ -290,10 +290,17 @@ surgical edit:
     ~2.6× SpMV-hot-loop win where linalg dominates (large N / DLP).
 
 So the GPU SpMV **and** its comm now run entirely on device buffers across the
-steady iteration; the remaining headroom is multi-GPU / multi-node (MPI),
-`x_dotprod` on the GPU (the lone surviving per-iteration D2H), and the same
-treatment for mksol. The default and DEVCOMM-only paths are unchanged and
-bit-exact (the default path keeps host-vector pinning and its measured speedup).
+steady iteration. The follow-on pieces are all landed too: **GPU `x_dotprod`**
+(the lone surviving per-iteration D2H, now a device gather off the resident
+vector) gives the krylov steady loop **zero** per-iteration host transfers; the
+same accumulator treatment extends to **mksol** and **secure** (device
+`addmul_tiny`). Residency is **gated to the single-node case**
+(`pi->wr[0]->njobs == 1 && pi->wr[1]->njobs == 1`) in all three drivers: the
+device comm only handles `njobs==1` and the sync-based MPI fallback yields no
+transfer win, so under MPI residency cleanly disables and the run takes the
+validated GPU-SpMV + host-comm path. The default and DEVCOMM-only paths are
+unchanged and bit-exact (the default path keeps host-vector pinning and its
+measured speedup).
 
 ## Kernel tuning — done (coalesced warp-per-row)
 
@@ -334,9 +341,20 @@ kernel tuning (ELL, column sorting, shared-mem `src`) is secondary.
     `product == N` in default, `DEVCOMM`, and `VECRESIDENT+DEVCOMM` modes. This is
     validated *plumbing*, not yet a transfer saver (it uploads+writes-back for
     correctness; see "Comm-on-device" above).
-- **Next:** full vector residency — port the actual hot comm
-  (`mmt_vec_reduce`+`mmt_vec_broadcast`, not `allreduce`) to the device and
-  complete the host-write invalidation / host-read sync coverage across
-  prep/secure/twist/krylov so the steady iterations skip H2D/D2H (the dominant
-  72% transfer share). Then multi-GPU/MPI wiring where the GPU's
-  aggregate-bandwidth advantage at scale lives.
+  - **full vector residency** — the 2D hot comm (`mmt_vec_reduce` +
+    `mmt_vec_broadcast`, not `allreduce`) ported to the device, plus GPU
+    `x_dotprod` and device `addmul_tiny` for mksol/secure, so the steady krylov
+    iteration runs entirely on device buffers with **zero** per-iteration host
+    transfers (D2H 100% / H2D ~99% skipped). `product == N` across
+    default/`DEVCOMM`/`VECRESIDENT+DEVCOMM` × `-t 2/4/8`; compute-sanitizer clean.
+    Gated to single-node (`njobs==1` on both grid axes).
+  - **multi-node MPI + per-rank multi-GPU**: the backend builds and runs under
+    MPI (the `--mpi` compile marker is applied only to non-CUDA languages so
+    `matmul-gpu.cu` compiles under nvcc), and `gpu_select_device()` binds one GPU
+    per node-local rank. `product == N` validated under `mpi=1x2`/`2x1` with GPU
+    SpMV; residency disables under MPI (host comm), so multi-rank runs stay
+    correct on a single GPU and round-robin on multi-GPU hardware.
+- **Next:** multi-node residency with a real transfer win — split the
+  local-device reduce from the MPI data exchange so device-resident vectors are
+  exchanged only across MPI (needs CUDA-aware MPI and multi-GPU HW to validate);
+  further kernel tuning (ELL, column sorting, shared-mem `src`) is secondary.

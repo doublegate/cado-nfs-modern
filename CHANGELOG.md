@@ -138,6 +138,21 @@ Work in progress — see the v3.1.0 roadmap. Landed so far:
   compute-sanitizer clean; mksol's matmul runs fully transfer-free (H2D 100% +
   D2H 100% skipped — even cleaner than krylov, the accumulator is never
   invalidated mid-block). GF(2) only; falls back to the host addmul otherwise.
+- **secure full vector residency + single-node residency gate.** `secure`'s
+  check-vector accumulator (the same GF(2) `addmul_tiny` as mksol, on the shared
+  `dvec`) now uses the device path too, so the last BWC stage that touched the
+  accumulator host-side each iteration stays device-resident. With this, residency
+  is **gated to the single-node case** in all three drivers (krylov/mksol/secure):
+  `pi->wr[0]->njobs == 1 && pi->wr[1]->njobs == 1`. The device comm only handles
+  `njobs==1`, and the sync-based MPI fallback yields no transfer win, so under MPI
+  residency now cleanly disables and the run takes the validated GPU-SpMV +
+  host-comm path (multi-node residency with a real transfer win needs a
+  local-device/MPI-data comm split — future work, needs multi-GPU HW to validate).
+  Also hardened `g_invalidate`: a host-buffer write (twist, or the MPI host comm)
+  now clears `host_dirty` as well as `current`, making the host fully authoritative
+  so a later `sync_to_host` cannot D2H stale device data over it. `product == N`:
+  single-rank resident `-t 4/8` PASS, `mpi=1x2`/`2x1` resident (disabled) PASS,
+  default/`DEVCOMM`/resident 12/12 PASS; compute-sanitizer clean.
 
 ### UI/UX (Track 3.1) — run-status reporting
 
