@@ -11,9 +11,23 @@ listed. For the upstream history see [`NEWS`](NEWS). The earlier `2.3.1-modern`
 release (rebased on upstream 2.3.0) is preserved under the `v2.3.1-modern` tag;
 `main` now tracks the latest release (`3.1.0-modern`).
 
-## [Unreleased]
+## [3.2.0-modern] — Unreleased
 
-Post-`3.1.0-modern` housekeeping (no code/behaviour change):
+Development cycle opened after `3.1.0-modern`. Plan in
+[`docs/ROADMAP-v3.2.0-modern.md`](docs/ROADMAP-v3.2.0-modern.md), grounded in
+current literature and the strategic reframe that **sieving (~91 % of RSA-250's
+cost) and polynomial selection** — not linear algebra (~9 %) — are where the
+leverage is. Targets: a faster GPU SpMV kernel (ELL/hybrid), GPU polynomial
+selection, 3-D lattice sieving, real multi-GPU/multi-node linear algebra
+(`CADO_GPU_NPART` + NVSHMEM), AVX-512 block/bucket sieving, mixed-representation
+ECM, and an autotuner + planner + web dashboard. Same ethos: `product == N` /
+bit-exact gate on every change, honest negatives, HW-gated work shipped as
+validated-at-degenerate-path code + design.
+
+- **Version bumped to `3.2.0-modern`** (`CMakeLists.txt` `CADO_VERSION_MINOR
+  1 → 2`); roadmap added.
+
+Post-`3.1.0-modern` housekeeping carried in this cycle (no code/behaviour change):
 
 - **Project renamed to `cado-nfs-modern`.** Both the local checkout and the
   GitHub repository were renamed `cado-nfs-3.0.0-modern` → `cado-nfs-modern`
