@@ -196,6 +196,26 @@ validated-at-degenerate-path code + design.
   belongs under DLP/exTNFS (A4), not the factorization track. `docs/ROADMAP-v3.2.0-modern.md`
   updated.
 
+### Algorithm (A3) — parallel structured Gaussian elimination (merge): already upstream (verified)
+
+- **A3 is already implemented upstream (honest finding).** `filter/merge.cpp` *is*
+  parallel structured Gaussian elimination — its header cites the exact roadmap
+  reference (Bouillaguet–Zimmermann, *Parallel Structured Gaussian Elimination for
+  the NFS*, Mathematical Cryptology 0(1), 2020) + the Davis–Duff–Nakov parallel
+  Markowitz threshold, implemented with ~50 OpenMP pragmas. It is the RSA-240/250
+  merge. The orchestration already runs it with **all logical threads**
+  (`tasks.filter.merge.threads` inherits `tasks.threads`; `bwc.threads` is the one
+  held to physical cores — toplevel doctest asserts merge=32 vs bwc=16 on a
+  16C/32T host). Nothing to add — recorded like A2's CPU path and the 3.1.0
+  PGO/micro-opt negatives.
+- **Verified it actually parallelizes (measured).** `filter/merge` wall-clock vs
+  `-t` on real purged matrices (i9-10850K): **c60** (20 K rows) 0.34→0.10 s =
+  **3.4× @ t8**; **c90** (303 K rows) 7.27→2.20 s = **3.3× @ t8**, then plateaus
+  and slightly regresses at 16–20. Honest: desktop-scale matrices saturate the
+  parallelism at ~8 threads (the B–Z scaling targets RSA-scale, tens of millions
+  of rows); but it still cuts merge wall ~3.3× and is on by default. See
+  `docs/parallel-merge-a3.md`.
+
 ### Algorithm (A2) — mixed-representation ECM: CPU already done; new validated GPU win
 
 - **CPU `facul` ECM already implements A2 (honest finding).** The Bouvier–Imbert

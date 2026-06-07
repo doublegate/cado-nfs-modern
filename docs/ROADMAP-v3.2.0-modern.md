@@ -62,10 +62,15 @@ kernel, real multi-GPU) it started.
   win landed; live wiring into `gpu_ecm`/`gpu_prefactor` (+ dedicated tripling and
   the final Edwards→Montgomery switch) is the next step. Feeds C3. See
   `docs/gpu-ecm-mixedrep.md`.
-- **A3. Parallel structured Gaussian elimination** for filtering/merge (the
-  algorithm used for RSA-240/250). The 3.1.0 benchmark re-run showed **merge is
-  the high-variance phase** (35–71 CPU-s at c70–c90); parallelizing it cuts that.
-  CPU, testable.
+- **A3. Parallel structured Gaussian elimination** for filtering/merge. **DONE /
+  honest finding: already implemented upstream.** `filter/merge.cpp` *is* the
+  Bouillaguet–Zimmermann parallel SGE (the exact roadmap reference, Math.
+  Cryptology 0(1) 2020) + the Davis–Duff–Nakov parallel Markowitz threshold,
+  ~50 OpenMP pragmas — the RSA-240/250 merge — and the orchestration already runs
+  it with all logical threads. Verified it parallelizes (measured ~3.3× at 8
+  threads on c60/c90 matrices; plateaus past 8 because desktop matrices are small
+  vs the RSA-scale regime the parallelism targets). No code change. See
+  `docs/parallel-merge-a3.md`.
 - **A4. (stretch) DLP: exTNFS / Tower-NFS exploration** for the medium-
   characteristic discrete-log side the fork supports. Research-grade,
   correctness-only; document feasibility rather than commit speculative math.
@@ -174,7 +179,7 @@ Building on 3.1.0's `--json-status`, `/status`, `/dashboard`, clap CLIs, and
 | 3 | ~~**A1** 3-D lattice sieving~~ → **C2 collision-search offload** | High | Med | A1 closed (TNFS/DLP only, not c100 — honest correction); the collision-search GPU offload is the real polyselect win |
 | 4 | **E2/E3** autotuner + planner ✓ DONE | Med | Low | UX + cuts variance; no raw speed |
 | 5 | **A2** mixed-rep ECM ✓ DONE (CPU already upstream; GPU win validated) | Med | Med | feeds C3 + CPU cofactor |
-| 6 | **A3** parallel merge | Med | Med | cuts the high-variance filtering phase |
+| 6 | **A3** parallel merge ✓ DONE (already upstream; verified ~3.3× @ t8) | Med | Med | cuts the high-variance filtering phase |
 | 7 | **D1** multi-GPU partition (real) | High | High | **the large-N / HPC win** (needs ≥2 GPUs) |
 | 8 | **B1/B2/B3** AVX-512 sieving + gf2x + IFMA | Med–High | Low | AVX-512-HW-only (SDE-correct, CI-perf) |
 | 9 | **D2** NVSHMEM multi-node residency | High | High | cluster win (needs CUDA-aware MPI + multi-GPU) |
