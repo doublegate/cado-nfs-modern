@@ -105,13 +105,22 @@ fn parse_snapshot(v: &Value) -> Snapshot {
         s.phase = phase;
         s.percent = jf64(v, "phase_percent");
         s.eta = jstr(v, "eta").filter(|e| e != "Unknown");
-        for k in ["computation", "input_digits", "wu_done", "wu_total", "updated"] {
+        for k in [
+            "computation",
+            "input_digits",
+            "wu_done",
+            "wu_total",
+            "updated",
+        ] {
             if let Some(val) = jstr(v, k) {
                 s.rows.push((k.replace('_', " "), val));
             }
         }
         if let Some(Value::Array(fs)) = v.get("factors") {
-            s.factors = fs.iter().filter_map(|f| f.as_str().map(String::from)).collect();
+            s.factors = fs
+                .iter()
+                .filter_map(|f| f.as_str().map(String::from))
+                .collect();
         }
     }
     s
@@ -158,7 +167,11 @@ fn draw(f: &mut Frame, url: &str, s: &Snapshot) {
         Span::raw("   "),
         Span::raw(s.phase.clone()),
     ]))
-    .block(Block::default().borders(Borders::ALL).title(" cado-nfs monitor "));
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" cado-nfs monitor "),
+    );
     f.render_widget(header, chunks[0]);
 
     let pct = s.percent.unwrap_or(0.0).clamp(0.0, 100.0);
@@ -192,10 +205,13 @@ fn draw(f: &mut Frame, url: &str, s: &Snapshot) {
     } else if s.factors.is_empty() {
         vec![Line::from(Span::raw("(none yet)"))]
     } else {
-        s.factors.iter().map(|x| Line::from(Span::raw(x.clone()))).collect()
+        s.factors
+            .iter()
+            .map(|x| Line::from(Span::raw(x.clone())))
+            .collect()
     };
-    let factors = Paragraph::new(ftext)
-        .block(Block::default().borders(Borders::ALL).title(" factors "));
+    let factors =
+        Paragraph::new(ftext).block(Block::default().borders(Borders::ALL).title(" factors "));
     f.render_widget(factors, chunks[3]);
 
     let footer = Paragraph::new(Line::from(Span::styled(
@@ -226,7 +242,9 @@ fn main() -> Result<()> {
         println!("phase:   {}", s.phase);
         println!(
             "percent: {}",
-            s.percent.map(|p| format!("{p:.1}%")).unwrap_or_else(|| "n/a".into())
+            s.percent
+                .map(|p| format!("{p:.1}%"))
+                .unwrap_or_else(|| "n/a".into())
         );
         for (k, v) in &s.rows {
             println!("{k}: {v}");

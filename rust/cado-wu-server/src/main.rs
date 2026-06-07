@@ -95,7 +95,9 @@ async fn main() -> Result<()> {
                          WHERE status=?2 AND timeassigned IS NOT NULL AND timeassigned < ?3",
                         rusqlite::params![AVAILABLE, ASSIGNED, cutoff],
                     ) {
-                        Ok(n) if n > 0 => eprintln!("# reclaimed {n} stale work-unit(s) -> AVAILABLE"),
+                        Ok(n) if n > 0 => {
+                            eprintln!("# reclaimed {n} stale work-unit(s) -> AVAILABLE")
+                        }
                         _ => {}
                     }
                 }
@@ -118,7 +120,10 @@ async fn main() -> Result<()> {
         .route("/control", post(control))
         .route("/status", get(status))
         .fallback(fallback_404)
-        .layer(axum::middleware::from_fn_with_state(state.clone(), whitelist_mw))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            whitelist_mw,
+        ))
         .with_state(state);
 
     let addr: std::net::SocketAddr = format!("{}:{}", cfg.addr, cfg.port).parse()?;
@@ -145,13 +150,19 @@ async fn main() -> Result<()> {
                 .with_context(|| format!("loading TLS cert/key {cert:?} {key:?}"))?;
             axum_server::bind_rustls(addr, tls)
                 .handle(handle)
-                .serve(app.clone().into_make_service_with_connect_info::<std::net::SocketAddr>())
+                .serve(
+                    app.clone()
+                        .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                )
                 .await?;
         }
         _ => {
             axum_server::bind(addr)
                 .handle(handle)
-                .serve(app.clone().into_make_service_with_connect_info::<std::net::SocketAddr>())
+                .serve(
+                    app.clone()
+                        .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                )
                 .await?;
         }
     }
@@ -211,11 +222,19 @@ fn ip_matches(ip: std::net::IpAddr, entry: &str) -> bool {
         };
         match (ip, net) {
             (IpAddr::V4(a), IpAddr::V4(b)) => {
-                let m = if plen >= 32 { u32::MAX } else { !(u32::MAX >> plen) };
+                let m = if plen >= 32 {
+                    u32::MAX
+                } else {
+                    !(u32::MAX >> plen)
+                };
                 (u32::from(a) & m) == (u32::from(b) & m)
             }
             (IpAddr::V6(a), IpAddr::V6(b)) => {
-                let m = if plen >= 128 { u128::MAX } else { !(u128::MAX >> plen) };
+                let m = if plen >= 128 {
+                    u128::MAX
+                } else {
+                    !(u128::MAX >> plen)
+                };
                 (u128::from(a) & m) == (u128::from(b) & m)
             }
             _ => false,
@@ -378,7 +397,9 @@ async fn upload(State(s): State<Arc<AppState>>, mut mp: Multipart) -> Response {
             Some(fname) => {
                 let data = match field.bytes().await {
                     Ok(b) => b,
-                    Err(e) => return (StatusCode::BAD_REQUEST, format!("read: {e}")).into_response(),
+                    Err(e) => {
+                        return (StatusCode::BAD_REQUEST, format!("read: {e}")).into_response()
+                    }
                 };
                 let safe = sanitize(&fname);
                 let dest = s.uploaddir.join(&safe);
@@ -453,20 +474,28 @@ fn record_result(
         // stored: the driver does int(files.command) when reading stdio. It may
         // arrive as a JSON number or string.
         let command: Option<i64> = info.and_then(|v| v.get("command")).and_then(|c| {
-            c.as_i64().or_else(|| c.as_str().and_then(|s| s.parse().ok()))
+            c.as_i64()
+                .or_else(|| c.as_str().and_then(|s| s.parse().ok()))
         });
         let _ = conn.execute(
             "INSERT INTO files (filename, path, type, command, wurowid) VALUES (?1,?2,?3,?4,?5)",
             rusqlite::params![basename, destpath.to_string_lossy(), key, command, rowid],
         );
     }
-    let new_status = if errorcode.unwrap_or(0) == 0 { RECEIVED_OK } else { RECEIVED_ERROR };
+    let new_status = if errorcode.unwrap_or(0) == 0 {
+        RECEIVED_OK
+    } else {
+        RECEIVED_ERROR
+    };
     let _ = conn.execute(
         "UPDATE workunits SET status=?1, resultclient=?2, errorcode=?3, timeresult=?4 \
          WHERE wurowid=?5",
         rusqlite::params![new_status, clientid, errorcode, now_dt(), rowid],
     );
-    eprintln!("# recorded result for wu {wuid} from {clientid}: status {new_status}, {} files", saved.len());
+    eprintln!(
+        "# recorded result for wu {wuid} from {clientid}: status {new_status}, {} files",
+        saved.len()
+    );
     (StatusCode::OK, "ok").into_response()
 }
 
@@ -474,7 +503,9 @@ fn record_result(
 // "YYYY-MM-DD HH:MM:SS.ffffff". The driver parses these to decide work-unit
 // timeouts, so the format must match for the in-process swap to interoperate.
 fn now_dt() -> String {
-    chrono::Utc::now().format("%Y-%m-%d %H:%M:%S%.6f").to_string()
+    chrono::Utc::now()
+        .format("%Y-%m-%d %H:%M:%S%.6f")
+        .to_string()
 }
 // A timestamp `secs` seconds in the past, same format -- used (with lexical
 // comparison, which is valid for this zero-padded format) to find stale rows.
@@ -486,7 +517,13 @@ fn dt_secs_ago(secs: u64) -> String {
 
 fn sanitize(name: &str) -> String {
     name.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || "._-".contains(c) { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || "._-".contains(c) {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -507,12 +544,24 @@ fn urldecode(s: &str) -> String {
     let mut i = 0;
     while i < b.len() {
         match b[i] {
-            b'+' => { out.push(' '); i += 1; }
+            b'+' => {
+                out.push(' ');
+                i += 1;
+            }
             b'%' if i + 2 < b.len() => match u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                Ok(byte) => { out.push(byte as char); i += 3; }
-                Err(_) => { out.push('%'); i += 1; }
+                Ok(byte) => {
+                    out.push(byte as char);
+                    i += 3;
+                }
+                Err(_) => {
+                    out.push('%');
+                    i += 1;
+                }
             },
-            c => { out.push(c as char); i += 1; }
+            c => {
+                out.push(c as char);
+                i += 1;
+            }
         }
     }
     out
@@ -535,9 +584,12 @@ struct Cfg {
 /// semantics as before; mapped into Cfg so main() and the rest are unchanged.
 /// `--whitelist` still accepts a comma-separated list (and may be repeated).
 #[derive(clap::Parser)]
-#[command(name = "cado-wu-server-rs", version,
-          about = "Async work-unit server for CADO-NFS \
-                   (same HTTP protocol + wudb SQLite schema as api_server.py)")]
+#[command(
+    name = "cado-wu-server-rs",
+    version,
+    about = "Async work-unit server for CADO-NFS \
+                   (same HTTP protocol + wudb SQLite schema as api_server.py)"
+)]
 struct Args {
     /// wudb SQLite database (shared with the Python driver)
     #[arg(long)]

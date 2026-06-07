@@ -120,9 +120,7 @@ fn build_http_client() -> Result<reqwest::blocking::Client> {
     }
     if let Ok(ca) = std::env::var("CADO_NFS_CAFILE") {
         let pem = std::fs::read(&ca).with_context(|| format!("reading cafile {ca}"))?;
-        b = b.add_root_certificate(
-            reqwest::Certificate::from_pem(&pem).context("parsing cafile")?,
-        );
+        b = b.add_root_certificate(reqwest::Certificate::from_pem(&pem).context("parsing cafile")?);
     }
     // --certsha1: pin the server cert by sha1 fingerprint. A custom rustls
     // verifier accepts the connection iff the presented end-entity cert hashes to
@@ -165,7 +163,14 @@ fn fetch_wu_failover(
             Err(e) => eprintln!("# server {srv} unreachable: {e}; trying next"),
         }
     }
-    (if reachable { Fetch::Empty } else { Fetch::Unreachable }, String::new())
+    (
+        if reachable {
+            Fetch::Empty
+        } else {
+            Fetch::Unreachable
+        },
+        String::new(),
+    )
 }
 
 fn fetch_one(client: &reqwest::blocking::Client, server: &str, clientid: &str) -> Result<Fetch> {
@@ -193,7 +198,11 @@ fn fetch_one(client: &reqwest::blocking::Client, server: &str, clientid: &str) -
 // command index a STDOUT<n>/STDERR<n>/RESULT<n> file came from (the trailing
 // digits of the file id); the server stores it and the driver reads stdio by it.
 fn fileinfo_entry(wuid: &str, key: &str) -> serde_json::Value {
-    let digits: String = key.chars().rev().take_while(|c| c.is_ascii_digit()).collect();
+    let digits: String = key
+        .chars()
+        .rev()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
     let mut v = serde_json::json!({"WUid": wuid, "key": key});
     if !digits.is_empty() {
         if let Ok(cmd) = digits.chars().rev().collect::<String>().parse::<i64>() {
@@ -215,7 +224,10 @@ fn process_wu(
 }
 
 fn subst_arch(name: &str, arch: &str) -> String {
-    substitute(name, &HashMap::from([("ARCH".to_string(), arch.to_string())]))
+    substitute(
+        name,
+        &HashMap::from([("ARCH".to_string(), arch.to_string())]),
+    )
 }
 
 fn download_files(
@@ -233,7 +245,10 @@ fn download_files(
         let dlpath = s.dldir.join(&dlname);
         let url = format!("{}/file/{}", server.trim_end_matches('/'), urlname);
 
-        let resp = client.get(&url).send().with_context(|| format!("GET {url}"))?;
+        let resp = client
+            .get(&url)
+            .send()
+            .with_context(|| format!("GET {url}"))?;
         if !resp.status().is_success() {
             bail!("download {url} -> status {}", resp.status());
         }
@@ -415,7 +430,9 @@ fn run_commands(s: &Settings, wu: &Workunit) -> Result<(Option<i32>, Option<Stri
                 Err(e) => eprintln!("# warning: STDIN{counter} {path}: {e}"),
             }
         }
-        let out = cmd.output().with_context(|| format!("spawning {}", argv[0]))?;
+        let out = cmd
+            .output()
+            .with_context(|| format!("spawning {}", argv[0]))?;
 
         let so_key = format!("STDOUT{counter}");
         if let Some(path) = map.get(&so_key) {
@@ -500,7 +517,11 @@ fn upload(
     form = form.text("fileinfo", serde_json::Value::Object(fileinfo).to_string());
 
     let url = format!("{}/upload", server.trim_end_matches('/'));
-    let resp = client.post(&url).multipart(form).send().context("POST /upload")?;
+    let resp = client
+        .post(&url)
+        .multipart(form)
+        .send()
+        .context("POST /upload")?;
     if !resp.status().is_success() {
         bail!("upload -> status {}", resp.status());
     }
@@ -512,9 +533,12 @@ fn upload(
 /// semantics as before; the TLS flags still set the CADO_NFS_* env vars the rest
 /// of the client reads, and `--server` may be repeated for failover.
 #[derive(clap::Parser)]
-#[command(name = "cado-nfs-client-rs", version,
-          about = "Static-binary work-unit client for CADO-NFS \
-                   (speaks the stock Python api_server protocol)")]
+#[command(
+    name = "cado-nfs-client-rs",
+    version,
+    about = "Static-binary work-unit client for CADO-NFS \
+                   (speaks the stock Python api_server protocol)"
+)]
 struct Args {
     /// server URL; repeat for failover (downloads/upload stick to the issuer)
     #[arg(long = "server", required = true)]
@@ -568,7 +592,9 @@ fn parse_args() -> Result<Settings> {
     Ok(Settings {
         servers: a.server,
         clientid: a.clientid.unwrap_or_else(default_clientid),
-        dldir: a.dldir.unwrap_or_else(|| std::env::temp_dir().join("cado-client-dl")),
+        dldir: a
+            .dldir
+            .unwrap_or_else(|| std::env::temp_dir().join("cado-client-dl")),
         workdir: a
             .workdir
             .unwrap_or_else(|| std::env::temp_dir().join("cado-client-work")),
