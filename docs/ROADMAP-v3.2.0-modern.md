@@ -71,9 +71,12 @@ kernel, real multi-GPU) it started.
   threads on c60/c90 matrices; plateaus past 8 because desktop matrices are small
   vs the RSA-scale regime the parallelism targets). No code change. See
   `docs/parallel-merge-a3.md`.
-- **A4. (stretch) DLP: exTNFS / Tower-NFS exploration** for the medium-
-  characteristic discrete-log side the fork supports. Research-grade,
-  correctness-only; document feasibility rather than commit speculative math.
+- **A4. DLP: exTNFS / Tower-NFS exploration.** ✓ **DONE (feasibility documented).**
+  CADO does classic NFS-DLP for GF(p)/GF(p²)/small-k GF(p^k) with a 2-D siever;
+  exTNFS (best for medium-char composite-k) sieves over a number-field tower → ≥3-D
+  siever (the A1 paper), tower polyselect, tower-ideal relations — a research-grade
+  multi-component effort, outside the fork's GPU leverage. Documented, no
+  speculative math committed. See `docs/extnfs-a4.md`.
 
 ## Track B — CPU performance (the honest envelope)
 
@@ -129,10 +132,14 @@ AVX-512, which this box can only validate (SDE) not perf-measure:
   arbitrary-precision multiply/division (separate large effort, not an A2 reuse).
   For GPU cofactorization, ECM (A2) is the better single-machine fit. See
   `docs/gpu-batch-smooth-c3.md`.
-- **C4. (research) GPU sieving feasibility study.** Honest: NFS lattice sieving is
-  memory-scatter-bound and largely unsolved on GPU (the "GPU tensor-core lattice
-  sieving" work is for lattice *cryptanalysis*, a different problem). Scope as a
-  *measured feasibility study*, not a promised feature.
+- **C4. GPU sieving feasibility study.** ✓ **DONE (measured negative).**
+  `bench/gpu-sieve-scatter.cu`: GPU atomic scatter is ~5.4× a full CPU socket on the
+  apply step in isolation (cache-resident regime), but byte-atomic granularity (no
+  8-bit GPU atomic), on-GPU update generation (~half the siever), memory capacity,
+  and pipeline integration are unsolved — no production GPU siever exists ("GPU
+  tensor-core lattice sieving" is SVP/lattice-reduction, a different problem).
+  Verdict: keep GPU effort on cofactorization/linalg/polyselect. See
+  `docs/gpu-sieving-c4.md`.
 
 ## Track D — GPU at scale (multi-GPU / HPC / multi-machine)
 
@@ -205,7 +212,7 @@ Building on 3.1.0's `--json-status`, `/status`, `/dashboard`, clap CLIs, and
 | 7 | **D1** multi-GPU partition (real) | High | High | **the large-N / HPC win** (needs ≥2 GPUs) |
 | 8 | **B1/B2/B3** AVX-512 sieving + gf2x + IFMA (B1 batched modinv ✓; B2 mul2/3/4 ✓; B3 plain-rep GF(p) ✓ — all SDE-validated) | Med–High | Low | AVX-512-HW-only (SDE-correct, CI-perf) |
 | 9 | **D2** NVSHMEM multi-node residency | High | High | cluster win (needs CUDA-aware MPI + multi-GPU) |
-| 10 | **C3** product-tree (leaf stage ✓ DONE; trees = big-int, CPU) · **C4 / A4** GPU-sieve study · exTNFS | High | High | research / regime-specific |
+| 10 | **C3** product-tree (leaf ✓) · **C4** GPU-sieve study ✓ (measured negative) · **A4** exTNFS ✓ (feasibility documented) | High | High | research / regime-specific |
 
 **Net north star:** put the GPU + algorithm effort where the cost actually is —
 **polynomial selection (C2) and sieving (A1, B1, D3)** — plus a **faster SpMV

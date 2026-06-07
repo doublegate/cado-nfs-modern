@@ -196,6 +196,37 @@ validated-at-degenerate-path code + design.
   belongs under DLP/exTNFS (A4), not the factorization track. `docs/ROADMAP-v3.2.0-modern.md`
   updated.
 
+### Research (A4) — exTNFS / Tower-NFS DLP feasibility (documented, not committed)
+
+- **Feasibility study for adding (extended) Tower NFS to the DLP side.** CADO does
+  classic NFS-DLP for GF(p), GF(p²) (integrated, `-gfpext 2`), and GF(p^k) small k
+  (manual polynomials), with a **2-D siever**. exTNFS (Kim–Barbulescu CRYPTO 2016;
+  Kim–Jeong PKC 2017) is the asymptotically-best method for medium-characteristic
+  GF(p^k) with composite k — but it sieves over a number-field **tower**, so
+  relations are higher-degree (`a(ι)+b(ι)x`) and the siever is **≥3-D** (the A1
+  paper, arXiv:2001.10860, is this — TNFS, not factorization; A4 is its home).
+  Component gap analysis: tower polynomial selection + a new higher-dimensional
+  siever + tower-ideal relation handling + tower individual-log — a research-grade,
+  multi-component effort, outside the fork's GPU leverage. **Documented, no
+  speculative tower math committed.** See `docs/extnfs-a4.md`.
+
+### Research (C4) — GPU lattice sieving feasibility (measured negative)
+
+- **Measured study: don't build a GPU NFS siever.** `bench/gpu-sieve-scatter.cu`
+  benchmarks the core sieve op (random `S[off]+=v` scatter) GPU vs CPU (RTX 3090 /
+  i9-10850K): in the cache-resident regime where bucket regions live, GPU atomic
+  scatter is **~5.4×** a full CPU socket (the CPU all-core plateaus at ~1.4 G
+  upd/s, bound by streaming the update arrays; the GPU edge is its HBM bandwidth).
+  But that is only the apply step in isolation — the **byte-atomic granularity** (no
+  8-bit GPU atomic; this probe used optimistic int cells), **on-GPU update
+  generation** (the per-prime lattice arithmetic + bucket fill, ~half the siever),
+  memory capacity, and pipeline integration are unsolved. Consistent with the
+  literature: GPUs have done NFS **cofactorization** for a decade, but **no
+  production GPU siever exists** ("GPU/tensor-core lattice sieving" is lattice
+  reduction / SVP, a different problem). Verdict: keep GPU effort on
+  cofactorization (A2), GPU linalg (C1/D1), and polyselect collisions (C2).
+  Recorded as a measured negative. See `docs/gpu-sieving-c4.md`.
+
 ### CPU/SIMD (B1) — AVX-512 sieving: batched modular inverse (SDE-validated; honest scatter wall)
 
 - **Vectorized the siever's one vectorizable hot slice; confirmed the rest is a
