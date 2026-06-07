@@ -41,6 +41,10 @@ __pycache__/
 /vpclmul-mul1n-test
 /vpclmul-muln-test
 /avx512-modinv
+# v3.3.0 standalone benches
+/avx2-modinv
+/gpu-ropt-stage2
+/gpu-lingen-ntt
 # compiled outputs of the bench/harness/ header validators (sources kept)
 /bench/harness/hdrtest
 /bench/harness/hdrtest_pclmul
