@@ -354,19 +354,27 @@ residency (transfers, done), and spreading the matrix across more GPUs
    node and multi-node via the unchanged MPI comm layer — the natural HPC
    scale-out and where the GPU's aggregate-bandwidth advantage compounds.
 
-   **Intra-node partition (implemented, `CADO_GPU_NPART`).** Independent of the
-   per-rank model, the backend can also split *one* rank's matrix across several
-   local GPUs: each direction's CSR is sliced into `nparts` contiguous output-row
-   chunks placed round-robin across `cudaGetDeviceCount()` devices, and `mul()`
-   runs one partial SpMV per chunk (src replicated) then gathers the dst chunks.
-   `nparts=1` (default) is the unchanged single-device path. Validation reality on
-   this box (one RTX 3090): `CADO_GPU_NPART=1/2/3` all return `product == N` on the
-   c59 — so the **split/multi-launch/gather logic is bit-exact** — but every chunk
-   maps to device 0, so genuine cross-device execution and the per-device-stream
-   overlap that turns the partition into a throughput win are **unverified** (need
-   2+ physical GPUs). On one GPU the partition is pure overhead; it exists for the
-   multi-GPU case. This path is independent of vector residency (alternative
-   strategies); `nparts>1` uses plain upload/compute/writeback.
+   **Intra-node partition (implemented + streamed, `CADO_GPU_NPART`; Track D1).**
+   Independent of the per-rank model, the backend can split *one* rank's matrix
+   across several local GPUs: each direction's CSR is sliced into `nparts`
+   contiguous output-row chunks placed round-robin across `cudaGetDeviceCount()`
+   devices. Each chunk owns a **per-device CUDA stream** (`Part::stream`), and
+   `mul()` issues the chunk's H2D-src / SpMV / D2H-dst **asynchronously on that
+   stream**, then synchronizes all streams at the end (D1). Because the chunks are
+   independent (disjoint output rows, each reading the full src), this overlaps the
+   chunks' copies+kernels and — on ≥2 GPUs — runs the devices **concurrently**.
+   `nparts=1` (default) is the unchanged single-device, default-stream path.
+
+   *Validation (one RTX 3090):* `CADO_GPU_NPART=2` returns **`product == N` on a
+   full c90 GNFS run** with `mm_impl=gpu` (and `=1/2/3` on the c59) — so the
+   **split → per-stream async multi-launch → gather is bit-exact**, and the streamed
+   staging path itself is exercised (both chunks land on device 0 here, summed
+   correctly). Genuine cross-device *concurrency* (and the throughput it buys)
+   still needs ≥2 physical GPUs — the per-device streams are the mechanism that
+   delivers it there. On one GPU the partition is correctness-overhead; it exists
+   for the multi-GPU case. Independent of vector residency; `nparts>1` uses plain
+   async upload/compute/writeback (pinned host staging would let H2D/D2H fully
+   overlap compute on pageable input too — a further opt).
 
 ## Status
 

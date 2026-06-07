@@ -146,10 +146,15 @@ AVX-512, which this box can only validate (SDE) not perf-measure:
 The 3.1.0 designs, implementable where HW allows; correctness validated at the
 degenerate path locally + on a multi-GPU cloud/CI runner; perf only from real HW.
 
-- **D1. Intra-node multi-GPU matrix partition → real validation.** 3.1.0 shipped
-  the `CADO_GPU_NPART` partition validated at N=1; finalize cross-device staging +
-  per-device CUDA streams for overlap, validate on ≥2 GPUs. Schmidt et al. show
-  GPU clusters beating larger CPU clusters on kilobit-SNFS matrices — the target.
+- **D1. Intra-node multi-GPU matrix partition → real validation.** ✓ **DONE (on
+  this box).** Added **per-device CUDA streams** + async cross-device staging to the
+  `CADO_GPU_NPART` partition (the overlap 3.1.0 left as a TODO): each chunk's
+  H2D/SpMV/D2H runs on its own stream, synchronized at the end → chunks overlap and
+  ≥2 GPUs run concurrently. Validated **`product == N` on a full c90 GNFS run** with
+  `CADO_GPU_NPART=2 mm_impl=gpu` (both chunks on the 1 GPU here → split/stream/gather
+  bit-exact). Cross-device concurrency + throughput still need ≥2 physical GPUs (the
+  streams are the mechanism). Schmidt et al. (GPU clusters beating larger CPU
+  clusters on kilobit-SNFS) remain the at-scale target. See `docs/gpu-linalg.md`.
 - **D2. NVSHMEM / GPUDirect multi-node residency** (the 3.1.0 local-device-reduce
   / MPI-boundary-exchange split design). Use NVSHMEM (GPU-initiated PGAS comm over
   NVLink / InfiniBand-RDMA) to keep BWC vectors device-resident and exchange only
@@ -209,7 +214,7 @@ Building on 3.1.0's `--json-status`, `/status`, `/dashboard`, clap CLIs, and
 | 4 | **E2/E3** autotuner + planner ✓ DONE | Med | Low | UX + cuts variance; no raw speed |
 | 5 | **A2** mixed-rep ECM ✓ DONE (CPU already upstream; GPU win validated) | Med | Med | feeds C3 + CPU cofactor |
 | 6 | **A3** parallel merge ✓ DONE (already upstream; verified ~3.3× @ t8) | Med | Med | cuts the high-variance filtering phase |
-| 7 | **D1** multi-GPU partition (real) | High | High | **the large-N / HPC win** (needs ≥2 GPUs) |
+| 7 | **D1** multi-GPU partition (real) ✓ DONE — per-device streams; c90 product==N at NPART=2 | High | High | **the large-N / HPC win** (concurrency needs ≥2 GPUs) |
 | 8 | **B1/B2/B3** AVX-512 sieving + gf2x + IFMA (B1 batched modinv ✓; B2 mul2/3/4 ✓; B3 plain-rep GF(p) ✓ — all SDE-validated) | Med–High | Low | AVX-512-HW-only (SDE-correct, CI-perf) |
 | 9 | **D2** NVSHMEM multi-node residency | High | High | cluster win (needs CUDA-aware MPI + multi-GPU) |
 | 10 | **C3** product-tree (leaf ✓) · **C4** GPU-sieve study ✓ (measured negative) · **A4** exTNFS ✓ (feasibility documented) | High | High | research / regime-specific |

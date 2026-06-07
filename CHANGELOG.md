@@ -196,6 +196,30 @@ validated-at-degenerate-path code + design.
   belongs under DLP/exTNFS (A4), not the factorization track. `docs/ROADMAP-v3.2.0-modern.md`
   updated.
 
+### GPU at scale (D1) — intra-node multi-GPU partition: per-device streams + real validation
+
+- **Finished the `CADO_GPU_NPART` partition with per-device CUDA streams (the
+  overlap 3.1.0 left as a TODO) and validated it end-to-end.** 3.1.0 shipped the
+  matrix partition (slice each direction's CSR into `nparts` output-row chunks,
+  round-robin over `cudaGetDeviceCount()` devices) but ran the chunks **sequentially**
+  ("genuine multi-GPU overlap would use per-device streams — unverified"). D1 adds a
+  `cudaStream_t` per chunk (created on its device) and makes `mul()` issue each
+  chunk's **async H2D-src / SpMV / async D2H-dst on that stream**, then synchronizes
+  all streams — so the chunks' copies+kernels overlap and, on ≥2 GPUs, the devices
+  run **concurrently** (the chunks are independent: disjoint output rows, each
+  reading the full src). `launch_spmv` is now stream-aware; `nparts=1` is the
+  unchanged default-stream single-device path.
+- **Validated `product == N` on a full c90 GNFS run** with
+  `CADO_GPU_NPART=2 tasks.linalg.bwc.mm_impl=gpu` — both chunks land on this box's
+  single GPU (round-robin, ndev=1), so the **split → per-stream async multi-launch →
+  gather is bit-exact** and the streamed staging path is genuinely exercised; the
+  two prime factors match the reference run. Cross-device *concurrency* still needs
+  ≥2 physical GPUs (the per-device streams are the mechanism that delivers it).
+- **Honest scope.** On one GPU the partition is correctness-overhead; the streamed
+  structure is what makes it a throughput win on real multi-GPU. Pinned host staging
+  (to fully overlap H2D/D2H with compute on pageable BWC vectors) is a further opt.
+  See `docs/gpu-linalg.md` (Intra-node partition).
+
 ### Research (A4) — exTNFS / Tower-NFS DLP feasibility (documented, not committed)
 
 - **Feasibility study for adding (extended) Tower NFS to the DLP side.** CADO does

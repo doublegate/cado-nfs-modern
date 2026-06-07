@@ -185,12 +185,15 @@ __global__ void spmv_vec(const uint32_t * rowptr, const uint32_t * col,
 }
 
 static void launch_spmv(int K, const uint32_t * rp, const uint32_t * col,
-                        const uint64_t * src, uint64_t * dst, unsigned int nrows)
+                        const uint64_t * src, uint64_t * dst, unsigned int nrows,
+                        cudaStream_t stream = 0)
 {
     /* Pick the sub-warp CSR-vector kernel (VEC=16) when the source vector is
      * cache-resident (~<=12 MB, i.e. the matrix fits the 3090's L2 with room),
      * else the latency-hiding full-warp kernel. Both are bit-exact. Override with
-     * CADO_GPU_SPMV={warp,vec}. (Near-square BWC matrices: nrows ~= ncols.) */
+     * CADO_GPU_SPMV={warp,vec}. (Near-square BWC matrices: nrows ~= ncols.)
+     * The optional stream lets the multi-GPU partition overlap chunks (per-device
+     * streams); stream==0 is the default-stream single-device path. */
     static const char * force = getenv("CADO_GPU_SPMV");
     const size_t VEC = 16;
     bool small = (size_t) nrows * K * sizeof(uint64_t) <= (size_t)(12u << 20);
@@ -199,17 +202,17 @@ static void launch_spmv(int K, const uint32_t * rp, const uint32_t * col,
     if (small) {
         int blk = (int)(((size_t) nrows * VEC + tpb - 1) / tpb);
         switch (K) {
-            case 1: spmv_vec<1, 16><<<blk, tpb>>>(rp, col, src, dst, nrows); break;
-            case 2: spmv_vec<2, 16><<<blk, tpb>>>(rp, col, src, dst, nrows); break;
-            case 4: spmv_vec<4, 16><<<blk, tpb>>>(rp, col, src, dst, nrows); break;
+            case 1: spmv_vec<1, 16><<<blk, tpb, 0, stream>>>(rp, col, src, dst, nrows); break;
+            case 2: spmv_vec<2, 16><<<blk, tpb, 0, stream>>>(rp, col, src, dst, nrows); break;
+            case 4: spmv_vec<4, 16><<<blk, tpb, 0, stream>>>(rp, col, src, dst, nrows); break;
             default: fprintf(stderr, "matmul-gpu: unsupported block width K=%d\n", K); abort();
         }
     } else {
         int blk = (int)(((size_t) nrows * 32 + tpb - 1) / tpb);
         switch (K) {
-            case 1: spmv_warp<1><<<blk, tpb>>>(rp, col, src, dst, nrows); break;
-            case 2: spmv_warp<2><<<blk, tpb>>>(rp, col, src, dst, nrows); break;
-            case 4: spmv_warp<4><<<blk, tpb>>>(rp, col, src, dst, nrows); break;
+            case 1: spmv_warp<1><<<blk, tpb, 0, stream>>>(rp, col, src, dst, nrows); break;
+            case 2: spmv_warp<2><<<blk, tpb, 0, stream>>>(rp, col, src, dst, nrows); break;
+            case 4: spmv_warp<4><<<blk, tpb, 0, stream>>>(rp, col, src, dst, nrows); break;
             default: fprintf(stderr, "matmul-gpu: unsupported block width K=%d\n", K); abort();
         }
     }
@@ -580,6 +583,7 @@ struct matmul_gpu : public matmul_interface {
         uint64_t * d_src = nullptr;       /* per-device full src copy */
         uint64_t * d_dst = nullptr;       /* per-device dst chunk (nr*K limbs) */
         size_t src_cap = 0, dst_cap = 0;
+        cudaStream_t stream = nullptr;    /* per-chunk stream (on dev) for overlap */
     };
     std::vector<Part> parts[2];           /* per direction */
     bool parts_ready = false;
@@ -702,6 +706,7 @@ void matmul_gpu<Arith>::ensure_device()
                 for (uint32_t i = 0; i <= pt.nr; i++) srp[i] = (*rpf[dir])[pt.row0 + i] - base;
                 uint32_t scol_n = (*rpf[dir])[row1] - base;
                 CUCHECK(cudaSetDevice(pt.dev));
+                CUCHECK(cudaStreamCreate(&pt.stream));    /* per-chunk stream on its device */
                 CUCHECK(cudaMalloc(&pt.d_rp, srp.size() * sizeof(uint32_t)));
                 CUCHECK(cudaMemcpy(pt.d_rp, srp.data(), srp.size() * sizeof(uint32_t), cudaMemcpyHostToDevice));
                 CUCHECK(cudaMalloc(&pt.d_col, (scol_n ? scol_n : 1) * sizeof(uint32_t)));
@@ -737,29 +742,42 @@ void matmul_gpu<Arith>::mul(void * xdst, void const * xsrc, int d)
     if (nparts > 1) {
         /* Partitioned multi-GPU path: one partial SpMV per row-chunk, src
          * replicated to each chunk's device, dst chunks gathered to the host.
-         * Plain upload/compute/writeback (independent of residency). Sequential
-         * over chunks (correct on any device count); genuine multi-GPU overlap
-         * would use per-device streams — unverified here (1 GPU). */
+         * Each chunk runs on its own per-device CUDA stream, so the H2D-src /
+         * kernel / D2H-dst of different chunks OVERLAP — and on >=2 GPUs the
+         * devices run concurrently (the work is independent: disjoint output rows,
+         * each reading the full src). All copies are async on the chunk's stream;
+         * we synchronize every stream before returning, so the host dst is complete
+         * and the result is bit-identical to the single-device path (validated at
+         * nparts>1 on a single GPU via product==N). Pinned host staging would let
+         * the H2D/D2H fully overlap compute on pageable input too — a further opt.
+         * Plain upload/compute/writeback, independent of vector residency. */
         size_t srcbytes = (size_t) ncols * K * sizeof(uint64_t);
         const uint64_t * src = (const uint64_t *) xsrc;
         uint64_t * dst = (uint64_t *) xdst;
+        /* phase 1: per-chunk async H2D-src, kernel, async D2H-dst on its stream */
         for (Part & pt : parts[dir]) {
             CUCHECK(cudaSetDevice(pt.dev));
             if (pt.src_cap < srcbytes) {
                 if (pt.d_src) cudaFree(pt.d_src);
                 CUCHECK(cudaMalloc(&pt.d_src, srcbytes)); pt.src_cap = srcbytes;
             }
-            CUCHECK(cudaMemcpy(pt.d_src, src, srcbytes, cudaMemcpyHostToDevice));
+            CUCHECK(cudaMemcpyAsync(pt.d_src, src, srcbytes, cudaMemcpyHostToDevice, pt.stream));
             size_t dchunk = (size_t) pt.nr * K * sizeof(uint64_t);
             if (pt.dst_cap < dchunk) {
                 if (pt.d_dst) cudaFree(pt.d_dst);
                 CUCHECK(cudaMalloc(&pt.d_dst, dchunk ? dchunk : 1)); pt.dst_cap = dchunk;
             }
             if (pt.nr) {
-                launch_spmv(K, pt.d_rp, pt.d_col, pt.d_src, pt.d_dst, pt.nr);
+                launch_spmv(K, pt.d_rp, pt.d_col, pt.d_src, pt.d_dst, pt.nr, pt.stream);
                 CUCHECK(cudaGetLastError());
-                CUCHECK(cudaMemcpy(dst + (size_t) pt.row0 * K, pt.d_dst, dchunk, cudaMemcpyDeviceToHost));
+                CUCHECK(cudaMemcpyAsync(dst + (size_t) pt.row0 * K, pt.d_dst, dchunk,
+                                        cudaMemcpyDeviceToHost, pt.stream));
             }
+        }
+        /* phase 2: barrier — wait for every chunk's stream to finish */
+        for (Part & pt : parts[dir]) {
+            CUCHECK(cudaSetDevice(pt.dev));
+            CUCHECK(cudaStreamSynchronize(pt.stream));
         }
         cudaSetDevice(0);
         n_mul++;
@@ -844,6 +862,7 @@ matmul_gpu<Arith>::~matmul_gpu()
     for (int dir = 0; dir < 2; dir++)
         for (Part & pt : parts[dir]) {
             if (pt.dev >= 0) cudaSetDevice(pt.dev);
+            if (pt.stream) cudaStreamDestroy(pt.stream);
             if (pt.d_rp) cudaFree(pt.d_rp);
             if (pt.d_col) cudaFree(pt.d_col);
             if (pt.d_src) cudaFree(pt.d_src);
