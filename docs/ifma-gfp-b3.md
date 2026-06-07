@@ -66,11 +66,15 @@ backend's plain representation, at the 260-bit (`p4`/`p5`) field range.
 - **Done:** the representation-compatible batched IFMA GF(p) primitives
   (`plain_mul`, `dotprod`), validated bit-exact vs GMP under SDE — the missing
   piece the existing Montgomery-only kernel did not provide.
-- **Remaining (the actual `arith-modp` code change):** route
-  `vec_add_dotprod` / `vec_addmul_and_reduce` for the `p4`/`p5` fields through an
-  IFMA path (limb repack 64-bit↔52-bit at the vector boundary, `R²` per field, the
-  8-lane block mapping). That is a real change to the templated `arith-modp`
-  vector ops and is **DLP-only**.
+- **B5 (v3.3.0-modern) — routing arithmetic validated:** the actual `arith-modp`
+  routing needs the limb repack 64-bit↔52-bit at the vector boundary plus the `+w`
+  initial addend of `vec_add_dotprod`. `bench/ifma-gfp.c` block 3 now validates the
+  **complete routed path** — radix-2^64 (arith-modp storage) → `bridge64to52` →
+  IFMA `w + Σ uᵢvᵢ` → `bridge52to64` → radix-2^64 — **bit-exact vs GMP, PASS
+  0/32000**. The in-tree templated `arith-modp` change itself stays **DLP-only** and
+  is **not committed** (it would be SDE-only, unvalidatable-on-this-box code); the
+  runtime-guarded (`__builtin_cpu_supports("avx512ifma")`, scalar fallback)
+  specialization is recorded as the IFMA-silicon follow-up design.
 - **Perf is gated on real AVX-512-IFMA silicon** (Ice Lake / Sapphire Rapids+);
   SDE is functional-only. Honest expectation: `plain_mul` pays 2 montmuls per
   result (the price of plain representation), so the win concentrates in

@@ -144,12 +144,44 @@ static void from52(mpz_t v, const uint64_t in[NLIMBS]) {
 }
 static uint64_t xrnd(uint64_t *s){ *s^=*s<<13; *s^=*s>>7; *s^=*s<<17; return *s; }
 
+/* ---- arith-modp routing bridge (Roadmap B5): arith-modp stores GF(p) elements
+ * in radix 2^64 (p4 = 4 limbs); the IFMA kernel works in radix 2^52. Routing
+ * vec_add_dotprod into arith-modp therefore needs a lossless repack each way.
+ * NL64 = 4 covers the <=256-bit p4 field used here. ---- */
+#define NL64 4
+static void to64(uint64_t out[NL64], const mpz_t v) {
+    mpz_t t; mpz_init_set(t, v);
+    for (int i = 0; i < NL64; i++) { out[i]=mpz_get_ui(t); mpz_fdiv_q_2exp(t,t,64); }
+    mpz_clear(t);
+}
+static void from64(mpz_t v, const uint64_t in[NL64]) {
+    mpz_set_ui(v, 0);
+    for (int i = NL64-1; i >= 0; i--) { mpz_mul_2exp(v,v,64); mpz_add_ui(v,v,in[i]); }
+}
+/* radix-2^64 (NL64 limbs) -> radix-2^52 (NLIMBS limbs): exact bit repack. */
+static void bridge64to52(uint64_t o[NLIMBS], const uint64_t in[NL64]) {
+    unsigned __int128 acc = 0; int bits = 0, src = 0;
+    for (int i = 0; i < NLIMBS; i++) {
+        while (bits < RADIX && src < NL64) { acc |= (unsigned __int128)in[src++] << bits; bits += 64; }
+        o[i] = (uint64_t)(acc & MASK52); acc >>= RADIX; bits -= RADIX;
+    }
+}
+/* radix-2^52 (NLIMBS limbs) -> radix-2^64 (NL64 limbs): exact bit repack. */
+static void bridge52to64(uint64_t o[NL64], const uint64_t in[NLIMBS]) {
+    unsigned __int128 acc = 0; int bits = 0, src = 0;
+    for (int i = 0; i < NL64; i++) {
+        while (bits < 64 && src < NLIMBS) { acc |= (unsigned __int128)(in[src++] & MASK52) << bits; bits += RADIX; }
+        o[i] = (uint64_t)acc; acc >>= 64; bits -= 64;
+    }
+}
+
 int main(void) {
     uint64_t seed = 0x1F3A2B5CULL;
     mpz_t R, R2z, Rinv, mpz_, e, g; mpz_inits(R,R2z,Rinv,mpz_,e,g,NULL);
     mpz_set_ui(R,1); mpz_mul_2exp(R, R, RADIX*NLIMBS);          /* R = 2^260 */
 
     long mul_trials=0, mul_wrong=0, dot_trials=0, dot_wrong=0;
+    long routed_trials=0, routed_wrong=0;
     const int VECN = 12;   /* dot-product length */
 
     for (int rep = 0; rep < 4000; rep++) {
@@ -215,13 +247,55 @@ int main(void) {
                 dot_trials++; if(mpz_cmp(g,acc[L])){ if(dot_wrong<3) gmp_printf("  dot MISMATCH L%d got %Zd exp %Zd\n",L,g,acc[L]); dot_wrong++; }
                 mpz_clear(acc[L]); }
         }
+        /* ---- (3) ROUTED vec_add_dotprod: w + sum_i a_i b_i mod m, staged through
+         *         arith-modp's radix-2^64 storage (Roadmap B5 routing bridge). ---- */
+        {
+            __m512i A[VECN][NLIMBS], B[VECN][NLIMBS], Wv[NLIMBS]; mpz_t exp[LANES];
+            uint64_t wL[NLIMBS][LANES];
+            for(int L=0;L<LANES;L++){
+                mpz_t w; mpz_init(w); mpz_set_ui(w,0);
+                for(int k=0;k<NLIMBS;k++){ mpz_mul_2exp(w,w,RADIX); mpz_add_ui(w,w,xrnd(&seed)&MASK52); }
+                mpz_mod(w,w,ms[L]); mpz_init_set(exp[L], w);          /* accumulator starts at w */
+                uint64_t l64[NL64], l52[NLIMBS]; to64(l64,w); bridge64to52(l52,l64);
+                for(int k=0;k<NLIMBS;k++) wL[k][L]=l52[k];
+                mpz_clear(w);
+            }
+            for(int k=0;k<NLIMBS;k++) Wv[k]=_mm512_loadu_si512(wL[k]);
+            for(int i=0;i<VECN;i++){
+                uint64_t aL[NLIMBS][LANES],bL[NLIMBS][LANES];
+                for(int L=0;L<LANES;L++){
+                    mpz_t a,b; mpz_inits(a,b,NULL); mpz_set_ui(a,0); mpz_set_ui(b,0);
+                    for(int k=0;k<NLIMBS;k++){ mpz_mul_2exp(a,a,RADIX); mpz_add_ui(a,a,xrnd(&seed)&MASK52);
+                                               mpz_mul_2exp(b,b,RADIX); mpz_add_ui(b,b,xrnd(&seed)&MASK52); }
+                    mpz_mod(a,a,ms[L]); mpz_mod(b,b,ms[L]);
+                    mpz_t t; mpz_init(t); mpz_mul(t,a,b); mpz_add(exp[L],exp[L],t); mpz_mod(exp[L],exp[L],ms[L]); mpz_clear(t);
+                    /* stage a,b through radix-2^64 (arith-modp storage) -> radix-2^52 */
+                    uint64_t l64[NL64], l52[NLIMBS];
+                    to64(l64,a); bridge64to52(l52,l64); for(int k=0;k<NLIMBS;k++)aL[k][L]=l52[k];
+                    to64(l64,b); bridge64to52(l52,l64); for(int k=0;k<NLIMBS;k++)bL[k][L]=l52[k];
+                    mpz_clears(a,b,NULL);
+                }
+                for(int k=0;k<NLIMBS;k++){ A[i][k]=_mm512_loadu_si512(aL[k]); B[i][k]=_mm512_loadu_si512(bL[k]); }
+            }
+            __m512i sv[NLIMBS]; dotprod_ifma(sv, A, B, VECN, mv, mpv, R2v);  /* sum a_i b_i */
+            __m512i rv[NLIMBS]; add_mod_ifma(rv, sv, Wv, mv);                /* + w */
+            uint64_t rL[NLIMBS][LANES]; for(int k=0;k<NLIMBS;k++)_mm512_storeu_si512(rL[k],rv[k]);
+            for(int L=0;L<LANES;L++){
+                uint64_t l52[NLIMBS], l64[NL64]; for(int k=0;k<NLIMBS;k++)l52[k]=rL[k][L];
+                bridge52to64(l64,l52); from64(g,l64);            /* back through radix-2^64 */
+                routed_trials++; if(mpz_cmp(g,exp[L])){ if(routed_wrong<3) gmp_printf("  routed MISMATCH L%d got %Zd exp %Zd\n",L,g,exp[L]); routed_wrong++; }
+                mpz_clear(exp[L]);
+            }
+        }
         for(int L=0;L<LANES;L++) mpz_clear(ms[L]);
     }
     printf("IFMA GF(p) plain-representation ops (arith-modp compatible), %d-bit, %d-way:\n", RADIX*NLIMBS, LANES);
     printf("  plain_mul  (a*b mod p)        : %s (%ld/%ld wrong)\n", mul_wrong?"FAIL":"PASS", mul_wrong, mul_trials);
     printf("  dotprod    (sum a_i b_i mod p): %s (%ld/%ld wrong)  [vec_add_dotprod shape, %d terms]\n",
            dot_wrong?"FAIL":"PASS", dot_wrong, dot_trials, VECN);
-    int fail = (mul_wrong||dot_wrong);
+    printf("  routed     (w + sum a_i b_i)  : %s (%ld/%ld wrong)  [B5: via radix-2^64 arith-modp bridge]\n",
+           routed_wrong?"FAIL":"PASS", routed_wrong, routed_trials);
+    int fail = (mul_wrong||dot_wrong||routed_wrong);
     printf("%s\n", fail?"FAILURES":"ALL PASS");
     mpz_clears(R,R2z,Rinv,mpz_,e,g,NULL);
     return fail;
