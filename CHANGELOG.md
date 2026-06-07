@@ -196,6 +196,33 @@ validated-at-degenerate-path code + design.
   belongs under DLP/exTNFS (A4), not the factorization track. `docs/ROADMAP-v3.2.0-modern.md`
   updated.
 
+### CPU/SIMD (B3) — AVX-512 IFMA GF(p) for the BWC backend (plain-rep, SDE-validated)
+
+- **Wired the v3.1.0 IFMA modmul toward CADO's GF(p) backend.** "mpfq" is now the
+  C++ `arith-modp` (`linalg/bwc/arith-modp*.hpp`, the `p1`…`p8` DLP BWC fields).
+  Reading it settled the integration: (1) `arith-modp` stores elements **plain**
+  (`[0,p)`, schoolbook mul + Barrett reduce) — *not* Montgomery, so the validated
+  Montgomery IFMA kernel can't drop in as-is; (2) the batched full-modmul sites are
+  `arith-generic.hpp`'s `vec_add_dotprod` / `vec_addmul_and_reduce` (the scalar
+  `mul` wastes 7/8 lanes; SpMV is multiply-by-small-coefficient).
+- **`bench/ifma-gfp.c`** builds the missing **plain-representation** batched
+  primitives on the validated Montgomery kernel with no per-element domain churn,
+  via `M(x,y)=x·y·R^{-1}`: `plain_mul(a,b)=M(M(a,b),R²)=a·b mod p` (two montmuls),
+  and `dotprod=Σ M(aᵢ,bᵢ)` then one final `M(·,R²)` — the common `R^{-1}`
+  amortizes (n montmuls + 1, not 2n; the `vec_add_dotprod` shape). Plain-in/out,
+  8-way (one GF(p) field per lane).
+- **Validated bit-exact vs GMP under Intel SDE** (wired into `bench/ifma-validate.sh`
+  + the `avx512-validate` CI): `plain_mul` and `dotprod` **PASS, 0/32000** at
+  260-bit (`p4`/`p5`). `mpz_mul; mpz_mod` *is* `arith-modp`'s `mul` semantics, so
+  this proves the IFMA path computes the backend's GF(p) ops in its plain
+  representation.
+- **Honest scope.** The representation-compatible primitive is done + validated;
+  the remaining `arith-modp` change (route `vec_add_dotprod`/`vec_addmul_and_reduce`
+  for `p4`/`p5` through IFMA — 64↔52-bit limb repack at the vector boundary, `R²`
+  per field, the 8-lane block map) is DLP-only, and the speedup is gated on real
+  AVX-512-IFMA silicon (`plain_mul` pays 2 montmuls/result; the win concentrates in
+  dotprod/addmul). See `docs/ifma-gfp-b3.md`.
+
 ### CPU/SIMD (B2) — AVX-512 VPCLMULQDQ gf2x mul2/mul3/mul4 (SDE-validated)
 
 - **Ported the fixed small gf2x Karatsuba kernels `gf2x_mul2` / `mul3` / `mul4` to
