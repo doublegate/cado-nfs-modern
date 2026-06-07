@@ -196,6 +196,33 @@ validated-at-degenerate-path code + design.
   belongs under DLP/exTNFS (A4), not the factorization track. `docs/ROADMAP-v3.2.0-modern.md`
   updated.
 
+### CPU/SIMD (B2) — AVX-512 VPCLMULQDQ gf2x mul2/mul3/mul4 (SDE-validated)
+
+- **Ported the fixed small gf2x Karatsuba kernels `gf2x_mul2` / `mul3` / `mul4` to
+  AVX-512 VPCLMULQDQ.** 3.1.0 shipped the hot variable-length `mul_1_n` (`mul1.h`)
+  + configure detection; `mul2`–`mul9` were PCLMUL copies. Each port packs its
+  independent Karatsuba base products into the 128-bit lanes of a 512-bit
+  `_mm512_clmulepi64_epi128` (imm 0x00 = lane.a.lo·lane.b.lo) and folds scalar-side:
+  **mul2** 3 products in 1 clmul, **mul3** 6 in 2, **mul4** 3×mul2. Implemented with
+  **AVX-512F + VPCLMULQDQ only** (the flags the vpclmul backend already adds — the
+  store-and-read style of `mul1.h`, no AVX-512DQ/VL), in
+  `gf2x/already_tuned/x86_64_vpclmul/gf2x_mul{2,3,4}.h`, guarded by
+  `GF2X_HAVE_VPCLMUL_SUPPORT` with the proven PCLMUL code kept as the `#else`
+  fallback.
+- **Validated bit-exact under Intel SDE** (`bench/vpclmul-muln.c`, wired into
+  `bench/vpclmul-validate.sh` + the `avx512-validate.yml` CI): 200 000 random trials
+  vs an independent scalar GF(2)[x] reference — **mul2/mul3/mul4 PASS, 0 wrong** at
+  128/192/256-bit. Additionally validated by compiling the *integrated headers
+  themselves* with `GF2X_HAVE_VPCLMUL_SUPPORT` (PASS, 0 wrong), and the PCLMUL
+  `#else` fallback re-verified to still compile + pass.
+- **Honest scope (correctness-only here; perf CI-gated).** Comet Lake has no
+  AVX-512, so this is SDE-validated; the speedup is gated on real AVX-512 silicon.
+  For these *fixed tiny* sizes the win is modest (a few clmuls fused vs the cost of
+  assembling the operand zmm) — the dominant Drucker–Gueron gain is the
+  variable-length `mul_1_n` already shipped. The Toom kernels `mul5`–`mul9` remain
+  PCLMUL fallbacks (correct; harder lane mapping). Threshold retune + `lingen`
+  perf need AVX-512 hardware. See `gf2x/already_tuned/x86_64_vpclmul/INTEGRATION.md`.
+
 ### GPU (C3) — batch-smoothness leaf extraction (validated, reuses A2; honest scope)
 
 - **The A2-reusable part of GPU batch smoothness, done and validated.** CADO's

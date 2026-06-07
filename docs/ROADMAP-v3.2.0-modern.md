@@ -86,8 +86,14 @@ AVX-512, which this box can only validate (SDE) not perf-measure:
   out — and it targets the 90 % phase. Correctness-only under Intel SDE + the CI
   gate; perf on an AVX-512 CI runner.
 - **B2. Complete the AVX-512 VPCLMULQDQ gf2x port** (`mul2`–`mul9` + threshold
-  retune; the Drucker–Gueron bigger gains are at 256/512-bit operands). 3.1.0
-  shipped `mul1` + detection. SDE-validated, perf CI-gated.
+  retune). **mul2/mul3/mul4 DONE** — VPCLMULQDQ Karatsuba kernels (pack base
+  products into the 512-bit lanes, one `_mm512_clmulepi64_epi128`, scalar fold),
+  AVX-512F+VPCLMULQDQ only, guarded with PCLMUL fallback; **bit-exact under Intel
+  SDE** (`bench/vpclmul-muln.c`, 0/200000 at 128/192/256-bit; integrated headers
+  also compiled+validated). 3.1.0 had shipped `mul1` + detection. Remaining: the
+  Toom kernels `mul5`–`mul9` (harder lane mapping), threshold retune, and the
+  `lingen` perf number — all need real AVX-512 silicon (perf CI-gated; the main DG
+  win is the already-shipped `mul_1_n`).
 - **B3. Finish the IFMA GF(p) backend → mpfq integration.** 3.1.0 has the
   validated standalone IFMA modmul kernel; wire it into mpfq's generated GF(p)
   arithmetic + the DLP BWC SpMV. SDE-validated.
@@ -187,7 +193,7 @@ Building on 3.1.0's `--json-status`, `/status`, `/dashboard`, clap CLIs, and
 | 5 | **A2** mixed-rep ECM ✓ DONE (CPU already upstream; GPU win validated) | Med | Med | feeds C3 + CPU cofactor |
 | 6 | **A3** parallel merge ✓ DONE (already upstream; verified ~3.3× @ t8) | Med | Med | cuts the high-variance filtering phase |
 | 7 | **D1** multi-GPU partition (real) | High | High | **the large-N / HPC win** (needs ≥2 GPUs) |
-| 8 | **B1/B2/B3** AVX-512 sieving + gf2x + IFMA | Med–High | Low | AVX-512-HW-only (SDE-correct, CI-perf) |
+| 8 | **B1/B2/B3** AVX-512 sieving + gf2x + IFMA (B2 mul2/3/4 ✓ DONE, SDE-validated) | Med–High | Low | AVX-512-HW-only (SDE-correct, CI-perf) |
 | 9 | **D2** NVSHMEM multi-node residency | High | High | cluster win (needs CUDA-aware MPI + multi-GPU) |
 | 10 | **C3** product-tree (leaf stage ✓ DONE; trees = big-int, CPU) · **C4 / A4** GPU-sieve study · exTNFS | High | High | research / regime-specific |
 

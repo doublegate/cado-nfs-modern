@@ -12,10 +12,21 @@ Ref: Drucker & Gueron, arXiv:2201.10473 (~39% on GF(2)[x] mul).
   case). The exact 4-wide fold logic is **validated bit-exact over 200 000 random
   trials under Intel SDE** (`bench/vpclmul-mul1n.c` / `bench/vpclmul-validate.sh`,
   `PASS`). Compiles to the real 512-bit `vpclmullqlqdq %zmm…`.
-- The rest of this directory (`gf2x_mul2.h … gf2x_mul9.h`, tuning tables) is
-  copied from `x86_64_pclmul`, so the backend is **complete and buildable**: the
-  hottest multiplier (`mul1`) is VPCLMULQDQ-accelerated, the larger ones fall
-  back to the proven PCLMUL code until they're ported too.
+- **`gf2x_mul2.h`, `gf2x_mul3.h`, `gf2x_mul4.h`** (3.2.0, B2) — VPCLMULQDQ ports of
+  the fixed small Karatsuba kernels, guarded by `GF2X_HAVE_VPCLMUL_SUPPORT` with
+  the proven PCLMUL code kept as the `#else` fallback. Each packs its independent
+  base products into the lanes of a 512-bit `_mm512_clmulepi64_epi128` (imm 0x00) —
+  mul2: 3 products in 1 call; mul3: 6 in 2 calls; mul4: 3×mul2 — then folds
+  scalar-side. **AVX-512F + VPCLMULQDQ only** (the flags this backend already
+  adds — no DQ/VL). **Validated bit-exact over 200 000 random trials under Intel
+  SDE** via `bench/vpclmul-muln.c` (standalone kernels) *and* by compiling the
+  integrated headers themselves with `GF2X_HAVE_VPCLMUL_SUPPORT` against the scalar
+  GF(2)[x] reference (both PASS, 0 wrong); the PCLMUL `#else` branch was
+  re-verified to still compile + pass.
+- `gf2x_mul5.h … gf2x_mul9.h` (Toom-based) + tuning tables remain copied from
+  `x86_64_pclmul`, so the backend stays **complete and buildable**: `mul1` +
+  `mul2/3/4` are VPCLMULQDQ-accelerated, `mul5…mul9` fall back to the proven
+  PCLMUL code (correct) until ported.
 
 ## Detection — DONE (source); regeneration is CI/release-side
 
@@ -55,11 +66,15 @@ the AVX-512 host with `-march=native` and the VPCLMULQDQ backend is selected.
 
 ## Remaining (perf-gated; needs real AVX-512 silicon)
 
-1. **Port `mul2.h … mul9.h`** to VPCLMULQDQ for the full speedup (the paper's
-   bigger gains are at 256/512-bit operands); they are currently the proven PCLMUL
-   code (valid on AVX-512), so the backend is complete and correct, just not yet
-   maximally fast. Each port is bit-exactly validated by the same SDE harness.
+1. **Port the Toom kernels `mul5.h … mul9.h`** to VPCLMULQDQ (mul2/3/4 done — see
+   Done). These are Toom-Cook with interpolation, not the clean Karatsuba packing
+   of mul2/3/4, so the lane mapping is more involved; they are currently the proven
+   PCLMUL code (valid on AVX-512), so the backend is complete and correct, just not
+   yet maximally fast. Each port is bit-exactly validated by the same SDE harness.
 2. **Re-tune** the Karatsuba/Toom thresholds (a faster base case shifts the
    crossovers) — requires perf measurement on AVX-512 hardware.
 3. **Benchmark `lingen`** on real AVX-512 silicon for the actual speedup number
-   (SDE is functional-only, not a performance model).
+   (SDE is functional-only, not a performance model). Honest expectation: for the
+   *fixed tiny* mul2/3/4 the win is modest (a few clmuls fused vs the cost of
+   assembling the operand zmm); the dominant Drucker–Gueron gain is the
+   variable-length `mul_1_n` already shipped in `mul1.h`.

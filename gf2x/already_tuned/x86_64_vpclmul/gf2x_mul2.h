@@ -39,11 +39,33 @@
 #error "This code is for 64-bit only"
 #endif
 
-#ifndef GF2X_HAVE_PCLMUL_SUPPORT
-#error "This code needs pclmul support"
+#if !defined(GF2X_HAVE_PCLMUL_SUPPORT) && !defined(GF2X_HAVE_VPCLMUL_SUPPORT)
+#error "This code needs pclmul or vpclmul support"
 #endif
 
-/* Karatsuba with 3 multiplications */
+#ifdef GF2X_HAVE_VPCLMUL_SUPPORT
+/* AVX-512 VPCLMULQDQ: the 3 Karatsuba products a0*b0, a1*b1, (a0^a1)*(b0^b1)
+ * go in lanes 0,1,2 (low 64 of each) and are produced by ONE
+ * _mm512_clmulepi64_epi128 (imm 0x00 = lane.a.lo * lane.b.lo), then folded
+ * scalar-side. AVX-512F + VPCLMULQDQ only (the flags this backend adds).
+ * Validated bit-exact vs the scalar GF(2)[x] reference over 200000 trials under
+ * Intel SDE (bench/vpclmul-muln.c). Ref: Drucker & Gueron, arXiv:2201.10473. */
+GF2X_STORAGE_CLASS_mul2
+void gf2x_mul2(unsigned long * t, unsigned long const * s1,
+        unsigned long const * s2)
+{
+    __m512i A = _mm512_set_epi64(0,0,0,(long long)(s1[0]^s1[1]),
+                                 0,(long long)s1[1], 0,(long long)s1[0]);
+    __m512i B = _mm512_set_epi64(0,0,0,(long long)(s2[0]^s2[1]),
+                                 0,(long long)s2[1], 0,(long long)s2[0]);
+    unsigned long p[8];
+    _mm512_storeu_si512((void*)p, _mm512_clmulepi64_epi128(A, B, 0x00));
+    unsigned long tklo = p[0]^p[2]^p[4], tkhi = p[1]^p[3]^p[5]; /* tk=P0^P1^P2 */
+    t[0]=p[0];        t[1]=p[1]^tklo;     /* P0 ^ (tk<<64)  */
+    t[2]=p[2]^tkhi;   t[3]=p[3];          /* P1 ^ (tk>>64)  */
+}
+#else
+/* Karatsuba with 3 multiplications (PCLMUL) */
 GF2X_STORAGE_CLASS_mul2
 void gf2x_mul2(unsigned long * t, unsigned long const * s1,
         unsigned long const * s2)
@@ -67,4 +89,5 @@ void gf2x_mul2(unsigned long * t, unsigned long const * s1,
     _mm_storeu_si128((__m128i *)(t+2), PXOR(t11, _mm_srli_si128(tk, 8)));
 #undef PXOR
 }
+#endif  /* GF2X_HAVE_VPCLMUL_SUPPORT */
 #endif  /* GF2X_MUL2_H_ */
