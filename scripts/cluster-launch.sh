@@ -185,7 +185,7 @@ per_node=$CLIENTS_PER_HOST
 # emit the shell to start the j-th (0-based) client on a node, with GPU pinning
 # when requested. $1 = a clientid prefix unique to the node/task.
 client_cmd() {  # client_cmd <cidprefix> <j>
-    local cidprefix="$1" j="$2" pin="" cid="$1.$2"
+    local j="$2" pin="" cid="$1.$2"
     if [ "$GPUS_PER_NODE" -gt 0 ]; then pin="CUDA_VISIBLE_DEVICES=$j "; cid="$1.gpu$j"; fi
     echo "${pin}nohup $CLIENT_BIN $cargs --clientid $cid >/tmp/cado-client-$cid.log 2>&1 &"
 }

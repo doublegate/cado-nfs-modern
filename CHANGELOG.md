@@ -9,23 +9,32 @@ This is a downstream **modernization + performance fork** of upstream
 rebased onto upstream **3.0.0**; only the changes introduced by this fork are
 listed. For the upstream history see [`NEWS`](NEWS). The earlier `2.3.1-modern`
 release (rebased on upstream 2.3.0) is preserved under the `v2.3.1-modern` tag;
-`main` now tracks the latest release (`3.1.0-modern`).
+`main` now tracks the latest release (`3.2.0-modern`).
 
-## [3.2.0-modern] — Unreleased
+## [3.2.0-modern] — 2026-06-07
 
-Development cycle opened after `3.1.0-modern`. Plan in
-[`docs/ROADMAP-v3.2.0-modern.md`](docs/ROADMAP-v3.2.0-modern.md), grounded in
-current literature and the strategic reframe that **sieving (~91 % of RSA-250's
-cost) and polynomial selection** — not linear algebra (~9 %) — are where the
-leverage is. Targets: a faster GPU SpMV kernel (ELL/hybrid), GPU polynomial
-selection, 3-D lattice sieving, real multi-GPU/multi-node linear algebra
-(`CADO_GPU_NPART` + NVSHMEM), AVX-512 block/bucket sieving, mixed-representation
-ECM, and an autotuner + planner + web dashboard. Same ethos: `product == N` /
-bit-exact gate on every change, honest negatives, HW-gated work shipped as
-validated-at-degenerate-path code + design.
+The cycle after `3.1.0-modern`, grounded in the strategic reframe that **sieving
+(~91 % of an RSA-250-scale run's cost) and polynomial selection** — not linear
+algebra (~9 %) — are where the leverage is ([`docs/ROADMAP-v3.2.0-modern.md`](docs/ROADMAP-v3.2.0-modern.md)).
+Same ethos throughout: every shipped change gated on `product == N`, a bit-exact
+check, or Intel-SDE validation; HW-blocked work ships as documented designs or
+correctness-validated kernels; **honest negatives and "already optimal upstream"
+findings recorded, not hidden.**
+
+**Headline (measured wins):** a validated GPU twisted-Edwards **mixed-representation
+ECM** (~1.5–2.9× the Montgomery ladder, bit-exact); an **adaptive sub-warp GPU
+SpMV** (1.3–1.8× cache-resident); **GPU polynomial-selection collision offload**;
+**AVX-512** VPCLMULQDQ `mul2/3/4` + IFMA GF(p) + a batched modular-inverse for the
+siever (all SDE-validated); real **multi-GPU partition** with per-device streams
+(`product == N` at `NPART=2`, c90); **cluster sieving orchestration** (Slurm job
+arrays + GPU-aware placement); and a **factor planner + per-host autotuner**.
+**Honest findings:** the parallel merge and CPU mixed-rep ECM are already the
+upstream RSA-record code; exTNFS-DLP is research-grade; GPU lattice sieving is a
+measured negative. Full per-track detail below.
 
 - **Version bumped to `3.2.0-modern`** (`CMakeLists.txt` `CADO_VERSION_MINOR
-  1 → 2`); roadmap added.
+  1 → 2`); roadmap added; README/CLAUDE/BENCHMARKS updated; the §6 GPU/SIMD
+  additions re-measured 2026-06-07 (`BENCHMARKS.md`).
 
 ### GPU (C1) — adaptive SpMV kernel (sub-warp CSR-vector)
 

@@ -1,15 +1,17 @@
 # Benchmarks
 
-Reference performance of **CADO-NFS 3.1.0-modern** on a single desktop —
-CPU factorization, the deterministic siever microbenchmark, and the 3.1.0 GPU /
-AVX-512 work. These numbers characterize this build on this class of hardware;
-they are not a comparison against other NFS implementations. Every factorization
-is verified (`product == N`, factors prime); every GPU/SIMD kernel is validated
-bit-exact against a CPU/GMP reference (or, for AVX-512, under Intel SDE).
+Reference performance of **CADO-NFS 3.2.0-modern** on a single desktop —
+CPU factorization, the deterministic siever microbenchmark, and the GPU /
+AVX-512 work through 3.2.0. These numbers characterize this build on this class of
+hardware; they are not a comparison against other NFS implementations. Every
+factorization is verified (`product == N`, factors prime); every GPU/SIMD kernel is
+validated bit-exact against a CPU/GMP reference (or, for AVX-512, under Intel SDE).
 
-_All numbers re-measured **2026-06-06** on the machine below. CPU factorization
-is unchanged from 3.0.0-modern (3.1.0 adds no CPU-path change — see §2), so those
-results carry forward, re-confirmed here._
+_CPU/GPU-linalg/prefactor/AVX-512 numbers re-confirmed **2026-06-06** (3.1.0); the
+**3.2.0 GPU + algorithm additions** (§6) measured **2026-06-07** on the same
+machine. CPU factorization is unchanged from 3.0.0/3.1.0-modern — **3.2.0 adds no
+CPU-path change** (all new work is GPU / AVX-512-SDE / orchestration) — so §1
+carries forward, re-confirmed here._
 
 ## Test machine
 
@@ -193,16 +195,69 @@ absent).
 
 | Kernel | Validation | Result |
 |--------|------------|--------|
-| gf2x **VPCLMULQDQ** `mul_1_n` / `addmul_1_n` (`bench/vpclmul-mul1n.c`) | bit-exact vs scalar, 200 000 random trials | **PASS** |
-| **IFMA** GF(p) Montgomery modmul, 8-way radix-2⁵² (`bench/ifma-modmul.c`) | bit-exact vs GMP, 260-bit, 8 lanes | **PASS** (0 / 32 000 wrong) |
+| gf2x **VPCLMULQDQ** `mul_1_n` / `addmul_1_n` (`bench/vpclmul-mul1n.c`) | bit-exact vs scalar, 200 000 trials | **PASS** |
+| **IFMA** GF(p) Montgomery modmul, 8-way radix-2⁵² (`bench/ifma-modmul.c`) | bit-exact vs GMP, 260-bit, 8 lanes | **PASS** (0 / 32 000) |
+| **(3.2.0, B2)** gf2x VPCLMULQDQ `mul2`/`mul3`/`mul4` (`bench/vpclmul-muln.c`) | bit-exact vs scalar GF(2)[x], 200 000 trials each | **PASS** (0 / 200 000 ×3) |
+| **(3.2.0, B3)** IFMA GF(p) plain-rep `plain_mul` + `vec_add_dotprod` (`bench/ifma-gfp.c`) | bit-exact vs GMP, 260-bit, 8-way | **PASS** (0 / 32 000 ×2) |
+| **(3.2.0, B1)** AVX-512 16-way batched 32-bit modular inverse (`bench/avx512-modinv.c`) | bit-exact vs GMP, 640 000 trials | **PASS** (0 / 640 000) |
 
 The gf2x VPCLMULQDQ backend is auto-detected by `configure` (run-test-gated, so a
-non-AVX-512 host safely keeps the pclmul backend); the IFMA modmul is the
-foundation kernel for a GF(p) DLP backend. See `CHANGELOG.md` (Tracks 1.1/1.4).
+non-AVX-512 host safely keeps the pclmul backend). B1 (the siever's per-prime
+modular inverse), B2 (the small Karatsuba gf2x kernels), and B3 (the `arith-modp`
+GF(p) BWC backend) are the 3.2.0 AVX-512 additions — correctness-only here, perf
+gated on real AVX-512 silicon. All in `.github/workflows/avx512-validate.yml`. See
+`docs/avx512-sieving-b1.md`, `docs/ifma-gfp-b3.md`, `CHANGELOG.md`.
 
 ---
 
-## 6. Reproducing
+## 6. v3.2.0 GPU + algorithm additions
+
+Measured **2026-06-07** (RTX 3090 + i9-10850K). Each is validated bit-exact /
+`product == N`; see the per-track docs for full analysis + honest scope.
+
+### 6.1 GPU mixed-representation ECM — twisted-Edwards vs the ladder (A2)
+
+`bench/gpu-ecm-edwards.cu`: an `a=−1` twisted-Edwards stage-1 (double-and-add and
+wNAF) vs the Montgomery XZ ladder, **bit-exact through the birational map**
+(0/8192 at every width). curves/s, `B1=2000`:
+
+| width | ladder | Edwards wNAF | speedup | Edwards d&a |
+|-------|-------:|-------------:|:-------:|:-----------:|
+| 128-bit | 299 K | 778 K | **2.60×** | 1.74× |
+| 256-bit | 132 K | 177 K | **1.34×** | 0.88× |
+| 512-bit | 24 K | 58 K | **2.36×** | 1.91× |
+
+wNAF wins (~1.3–2.6× here, growing with width; small-batch run-to-run variance);
+plain double-and-add is ≈ break-even (theory 12.5 vs 11 mm/bit). The CPU `facul`
+path already uses mixed-rep (the upstream "mishmash"); this is the GPU half.
+
+### 6.2 Adaptive GPU SpMV — sub-warp vec16 (C1)
+
+`bench/gpu-spmv-bench.cu`, bit-exact at every size. In the cache-resident regime
+the sub-warp CSR-vector kernel (vec16) beats the warp kernel; the backend
+dispatches adaptively (vec16 when L2-resident, warp otherwise):
+
+| ~size | rows | GPU warp | GPU vec16 | vec16 ÷ warp | CPU (20 thr) |
+|-------|-----:|---------:|----------:|:------------:|-------------:|
+| c100 (b64) | 0.8 M | 32.8 | **43.5** Gnz/s | **1.32×** | 2.05 |
+| c115 (b64) | 2.0 M | 11.6 | 10.8 (warp picked) | — | 0.75 |
+
+### 6.3 GPU batch-smoothness leaf (C3) & GPU sieving feasibility (C4)
+
+- **C3** (`bench/gpu-batch-smooth.cu`): the Bernstein batch-smoothness *leaf*
+  extraction (`gcd(R, (P mod R)^{2^e} mod R)`, reusing the A2 montmul), **bit-exact
+  vs GMP** (0/8192 at 128/256/512-bit), **14–24 Mleaf/s** (0.04–0.26 µs/leaf).
+  Honest: the leaf is the only fixed-width-arithmetic fit; the batch-smoothness
+  bottleneck is the big-integer remainder tree, which stays CPU/GMP.
+- **C4** (`bench/gpu-sieve-scatter.cu`, measured negative): GPU atomic scatter (the
+  core sieve op) is **~6.4× a full CPU socket** in the cache-resident regime (16
+  KiB: 6960 vs 1082 M upd/s) — but byte-atomic granularity, on-GPU update
+  generation, and capacity make a GPU siever unsolved; keep GPU on cofactorization
+  / linalg / polyselect.
+
+---
+
+## 7. Reproducing
 
 ```bash
 # one-time: create the Flask/requests venv the 3.0.0 orchestrator needs
@@ -225,10 +280,19 @@ nvcc -arch=sm_86 -O3 -Xcompiler -pthread bench/gpu-spmv-bench.cu -o gpu-spmv-ben
 CADO_GPU_VECRESIDENT=1 CADO_GPU_DEVCOMM=1 $PY ./cado-nfs.py <c90> tasks.linalg.bwc.mm_impl=gpu -t 8
 
 # 5. AVX-512 kernels under Intel SDE (auto-detects /opt/intel-sde/sde64)
-bash bench/vpclmul-validate.sh
-bash bench/ifma-validate.sh
+bash bench/vpclmul-validate.sh      # gf2x mul_1_n + mul2/3/4 (3.1.0 + B2)
+bash bench/ifma-validate.sh         # IFMA modmul + GF(p) plain-rep (3.1.0 + B3)
+bash bench/avx512-modinv-validate.sh  # B1 siever batched modular inverse
+
+# 6. v3.2.0 GPU additions (need CUDA; standalone, no CADO build):
+nvcc -arch=sm_86 -O3 bench/gpu-ecm-edwards.cu -o gpu-ecm-edwards && ./gpu-ecm-edwards          # A2
+nvcc -arch=sm_86 -O3 bench/gpu-batch-smooth.cu -lgmp -o gpu-batch-smooth && ./gpu-batch-smooth  # C3
+nvcc -arch=sm_86 -O3 -Xcompiler -fopenmp bench/gpu-sieve-scatter.cu -o gpu-sieve-scatter && ./gpu-sieve-scatter  # C4
+# multi-GPU partition end-to-end (needs -DENABLE_GPU=ON), bit-exact product==N:
+CADO_GPU_NPART=2 $PY ./cado-nfs.py <c90> tasks.linalg.bwc.mm_impl=gpu -t 8       # D1
 ```
 
-_Re-measured 2026-06-06 on the machine above (CADO-NFS 3.1.0-modern). Re-run on
-your own hardware to recalibrate; `-t <n>` sets the thread count, `-DENABLE_GPU=ON`
-in `local.sh` builds the GPU backend._
+_CPU/3.1.0 numbers re-confirmed 2026-06-06; the §6 3.2.0 additions measured
+2026-06-07 (CADO-NFS 3.2.0-modern) on the machine above. Re-run on your own
+hardware to recalibrate; `-t <n>` sets the thread count, `-DENABLE_GPU=ON` in
+`local.sh` builds the GPU backend._

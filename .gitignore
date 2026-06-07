@@ -30,6 +30,17 @@ __pycache__/
 /ifma-modmul
 /vpclmul-test
 /bench-*
+# v3.2.0 standalone benches
+/gpu-ecm-edwards
+/gpu-ecm-mp
+/gpu-batch-smooth
+/gpu-sieve-scatter
+/gpu-polyselect-collision
+/ifma-gfp
+/vpclmul-muln
+/vpclmul-mul1n-test
+/vpclmul-muln-test
+/avx512-modinv
 
 # Profiling / PGO artifacts (gcc -fprofile-generate/-use, perf, gcov)
 *.gcda

@@ -1,4 +1,4 @@
-# CADO-NFS 3.1.0-modern
+# CADO-NFS 3.2.0-modern
 
 A **modernization + performance fork** of
 [CADO-NFS](https://gitlab.inria.fr/cado-nfs/cado-nfs) — a complete
@@ -11,26 +11,32 @@ logarithms in finite fields.
 > several tracks of *rigorously measured* performance and orchestration work.
 > From **3.1.0-modern** the fork carries its own minor line — still upstream
 > 3.0.0's NFS algorithms, numerics, and parameters (**unchanged**), the bump
-> reflecting substantial original work: **GPU linear algebra** with full vector
-> residency, a **GPU pre-NFS ECM factoring front-end**, **AVX-512 VPCLMULQDQ +
-> IFMA** kernels (SDE-validated), and an expanded **orchestration / UX** layer,
-> on top of the 3.0.0-modern build/SIMD/GPU-cofactor/Rust tracks. Every change is
-> a portability or throughput/robustness optimization, gated on `make check` +
-> verified `product == N` factorizations (or a bit-exact validation); hardware-
-> blocked items (multi-GPU/multi-node) are shipped as documented designs, not
-> unvalidated code. Results are reported honestly, including the parts that did
-> **not** pay off.
+> reflecting substantial original work. **3.2.0-modern** continues that, aiming
+> the GPU + algorithm effort where the cost actually is (sieving and polynomial
+> selection, ~91 % of an RSA-250-scale run): a **validated GPU mixed-representation
+> (twisted-Edwards) ECM** (~1.5–2.9× the Montgomery ladder), **GPU
+> polynomial-selection collision offload**, an **adaptive GPU SpMV** kernel,
+> **AVX-512 VPCLMULQDQ `mul2/3/4` + IFMA GF(p) + batched modular-inverse** kernels
+> (all SDE-validated), real **multi-GPU partition** (per-device streams, `product
+> == N` at scale) with a **multi-node NVSHMEM/GPUDirect design**, **cluster sieving
+> orchestration** (Slurm job arrays, GPU-aware placement), and a **factor planner +
+> per-host autotuner** — on top of the 3.1.0 GPU-linalg / GPU-prefactor / AVX-512 /
+> orchestration tracks and the 3.0.0-modern build/SIMD/GPU-cofactor/Rust base.
+> Every change is gated on `make check` + verified `product == N` (or a bit-exact /
+> SDE validation); hardware-blocked items (multi-GPU/multi-node, AVX-512 perf) ship
+> as documented designs or correctness-validated kernels, not unvalidated claims.
+> Results are reported honestly, including the parts that did **not** pay off and
+> the work that turned out **already optimal upstream**.
 >
 > This is **not** the official CADO-NFS. For releases, ongoing development, and
-> support, use the upstream project (links at the bottom). The earlier
-> 2.3.0-based release (`2.3.1-modern`) is preserved under the `v2.3.1-modern`
-> tag, and `3.0.0-modern` under `v3.0.0-modern`.
+> support, use the upstream project (links at the bottom). Earlier releases are
+> preserved under their tags: `2.3.1-modern`, `v3.0.0-modern`, `v3.1.0-modern`.
 
 [![CI](https://github.com/doublegate/cado-nfs-modern/actions/workflows/ci.yml/badge.svg)](https://github.com/doublegate/cado-nfs-modern/actions/workflows/ci.yml)
 [![AVX-512 validation](https://github.com/doublegate/cado-nfs-modern/actions/workflows/avx512-validate.yml/badge.svg)](https://github.com/doublegate/cado-nfs-modern/actions/workflows/avx512-validate.yml)
 [![License: LGPL-2.1](https://img.shields.io/badge/License-LGPL%202.1-blue.svg)](COPYING)
 [![Upstream: 3.0.0](https://img.shields.io/badge/upstream-CADO--NFS%203.0.0-informational.svg)](https://gitlab.inria.fr/cado-nfs/cado-nfs)
-[![Release: 3.1.0-modern](https://img.shields.io/badge/release-3.1.0--modern-success.svg)](https://github.com/doublegate/cado-nfs-modern/releases/tag/v3.1.0-modern)
+[![Release: 3.2.0-modern](https://img.shields.io/badge/release-3.2.0--modern-success.svg)](https://github.com/doublegate/cado-nfs-modern/releases/tag/v3.2.0-modern)
 
 **Jump to:** [Quick start](#quick-start) · [Performance](#performance) ·
 [What this fork changes](#what-this-fork-changes-vs-upstream-300) ·
@@ -108,8 +114,9 @@ was verified (factors multiply back to the input and are prime).
 | 80 | ~265 | 74.4 s | 406.0 s | 5.5× | −27 % |
 | 90 | ~299 | 197.9 s | 1604.2 s | 8.1× | −17 % |
 
-(Re-measured 2026-06-06 on 3.1.0-modern; 3.1.0 adds no CPU-path change, so these
-match the 3.0.0-modern line within run-to-run variance.)
+(Re-confirmed 2026-06-07 on 3.2.0-modern; like 3.1.0, 3.2.0 adds **no CPU-path
+change** — all new work is GPU / AVX-512 (SDE-validated) / orchestration — so these
+match the 3.0.0/3.1.0-modern line within run-to-run variance.)
 
 **Key findings**
 
@@ -130,15 +137,21 @@ match the 3.0.0-modern line within run-to-run variance.)
 - **Practical envelope on this desktop:** ≤c75 interactive · c80-c95 a few
   minutes · ~c100 ≈ 10 min · ~c110 ≈ 1 hr · ≥c130 wants distributed mode.
 
-**GPU (3.1.0-modern, RTX 3090).** The GPU pre-factoring ECM front-end runs
-**48.7× / 25.4× / 10.5×** the full 20-thread CPU at 128/256/512-bit moduli, and
-the GPU BWC SpMV holds **8.1 Gnz/s at c120-scale (240 M nonzeros, bit-exact)** —
-~4.5× the tuned CPU `bucket` backend (saturated at ~1.8 Gnz/s), with the advantage
-**widening as the matrix grows** (the CPU loop is memory-bound; this is where
-large-N linear algebra lives). Full vector residency removes the per-iteration
-PCIe transfers in the steady krylov loop (end-to-end c90 `product == N`, bwc
-8.18 s). AVX-512 VPCLMULQDQ + IFMA kernels are bit-exact under Intel SDE. These
-are GPU-build (`-DENABLE_GPU=ON`) results; the CPU table above is the default build.
+**GPU (RTX 3090).** The GPU pre-factoring ECM front-end runs **48.7× / 25.4× /
+10.5×** the full 20-thread CPU at 128/256/512-bit moduli; the GPU BWC SpMV holds
+**8.1 Gnz/s at c120-scale (240 M nonzeros, bit-exact)** — ~4.5× the tuned CPU
+`bucket` backend (saturated ~1.8 Gnz/s), widening as the matrix grows. Full vector
+residency removes the per-iteration PCIe transfers (end-to-end c90 `product == N`).
+**New in 3.2.0:** an **adaptive sub-warp SpMV** kernel adds **1.3–1.8×** in the
+cache-resident regime (**43.5 Gnz/s** at c100-scale); a **twisted-Edwards
+mixed-representation ECM** stage-1 is **~1.5–2.9×** the Montgomery ladder
+(bit-exact, growing with modulus width); GPU **polynomial-selection collision
+offload** and a **batch-smoothness leaf** kernel are validated bit-exact; the
+**multi-GPU matrix partition** now uses per-device streams and was validated
+`product == N` on a full c90 run at `CADO_GPU_NPART=2`. AVX-512 VPCLMULQDQ
+`mul2/3/4`, IFMA GF(p), and a batched modular-inverse kernel are all bit-exact
+under Intel SDE. GPU results need `-DENABLE_GPU=ON`; the CPU table above is the
+default build.
 
 Full methodology, per-phase breakdown, the 2.3.1→3.0.0 comparison, the GPU
 sweeps, projections, and seeded reproducible inputs:
@@ -157,6 +170,28 @@ that, this fork adds four independently-validated tracks:
 | **2 · SIMD** | AVX2 on the siever profiled; an AVX-512 **VPCLMULQDQ** gf2x base-case kernel added | AVX2 ruled out (the hot path is scatter + scalar modarith, not vectorizable). The gf2x kernel is **validated bit-exact** under Intel SDE; perf is gated on real AVX-512 silicon (the reference box is Comet Lake). |
 | **3 · GPU ECM cofactorization** | A batched CUDA ECM backend (`sieve/ecm/gpu/`) behind `facul`/`las-cofactor`, validated bit-exact vs the CPU path | The GPU modmul primitive is ~39× a 20-core CPU — but cofactorization is only ~8 % of siever time, so **honestly, no net single-machine speedup at these sizes** (Amdahl-bounded). Documented as a measured negative, not an unsubstantiated win. |
 | **4 · Rust orchestration** | The `rust/` workspace — a static-binary work-unit **client** and an async **server**, same HTTP/JSON protocol + `wudb` SQLite schema | Interoperates with an unmodified `cado-nfs.py`; the Rust server can be **swapped in** for the Flask server live (`CADO_RUST_WU_SERVER=…`), with TLS, IP-whitelist, and cert-pinning. For multi-client robustness, not single-machine speed. |
+
+### New in 3.2.0-modern
+
+3.2.0 aims the GPU + algorithm effort where an RSA-scale run's cost actually lives
+— **sieving and polynomial selection (~91 %)**, not just linear algebra (~9 %) —
+and finishes the AVX-512 and multi-GPU tracks. Every entry is gated on `product ==
+N`, a bit-exact check, or Intel-SDE validation; several investigations honestly
+concluded **"already optimal upstream"** or **"measured negative."**
+
+| Track | What | Result |
+|-------|------|--------|
+| **GPU mixed-rep ECM (A2)** | A twisted-Edwards `a=−1` extended-coordinate stage-1 (`bench/gpu-ecm-edwards.cu`) for the GPU pre-factor/cofactor ECM, with double-and-add and wNAF | **Bit-exact vs the Montgomery ladder** through the birational map (0/8192 at 128/256/512-bit); wNAF is **~1.5–2.9×** the ladder, the win **growing with modulus width**. (The CPU `facul` path already does mixed-rep — the upstream "mishmash" bytecode.) |
+| **GPU polyselect + SpMV (C1/C2)** | An **adaptive sub-warp SpMV** (vec16) kernel; **GPU collision-search offload** for Kleinjung stage-1, size-gated behind `--gpu-polyselect` | SpMV **1.3–1.8×** the warp kernel cache-resident (43.5 Gnz/s); polyselect collisions produce a **byte-identical** polynomial set, `product == N`. |
+| **AVX-512 (B1/B2/B3)** | VPCLMULQDQ gf2x `mul2/3/4`; IFMA GF(p) plain-representation `plain_mul`/`vec_add_dotprod`; a 16-way **batched modular inverse** for the siever's per-prime lattice setup | All **bit-exact under Intel SDE** (gf2x 0/200000; IFMA 0/32000; modinv 0/640000), CI-gated. Honest: the siever's byte-scatter majority does **not** vectorize on AVX-512 (no 8-bit scatter); perf gated on real AVX-512 silicon. |
+| **Multi-GPU / HPC (D1/D2/D3)** | Per-device CUDA streams for the `CADO_GPU_NPART` partition; a multi-node **NVSHMEM/GPUDirect** residency design; **cluster sieving** orchestration (Slurm `sbatch` job arrays, GPU-aware one-client-per-GPU placement) | Partition validated **`product == N` on a full c90** at `NPART=2`; multi-node is a HW-gated design (single-rank degenerate path validated); cluster driver validated across SSH/srun/sbatch. |
+| **Algorithm + UX (A3/C3/E2/E3)** | Parallel structured Gaussian elimination (merge); GPU batch-smoothness leaf; a **factor planner** (`--plan`) + **per-host autotuner** (`--autotune`) | Merge is **already the parallel B–Z code** (verified ~3.3× at 8 threads); the batch-smooth leaf is bit-exact vs GMP (the tree stays CPU/GMP); `--plan` estimates feasibility/wall-time/strategy; `--autotune` tunes only safe scheduling knobs (`product == N` preserved). |
+
+The honest through-line continues: **CPU-side and several algorithm tracks are
+already optimal upstream** (the parallel merge and the CPU mixed-rep ECM are the
+RSA-record code), so the fork's measured wins concentrate in the **GPU fixed-width
+tracks** and **orchestration**. exTNFS-DLP and GPU-lattice-sieving were studied and
+**documented as research-grade / measured-negative**, not pursued.
 
 ### New in 3.1.0-modern
 
@@ -209,12 +244,16 @@ The pipeline, stage by stage (each maps to a top-level directory):
 | [`README.upstream.md`](README.upstream.md) | Upstream 3.0.0's full build / usage / distributed / troubleshooting guide |
 | [`docs/number-field-sieve-plain-english.md`](docs/number-field-sieve-plain-english.md) | The NFS, in layman's terms |
 | [`docs/number-field-sieve.md`](docs/number-field-sieve.md) | The NFS mathematics, in depth |
-| [`docs/gpu-linalg.md`](docs/gpu-linalg.md) | GPU BWC SpMV backend + full vector residency: kernel, transfer analysis, at-scale sweep, multi-GPU partition + multi-node residency design |
+| [`docs/gpu-linalg.md`](docs/gpu-linalg.md) | GPU BWC SpMV backend + full vector residency: kernel, transfer analysis, at-scale sweep, multi-GPU partition (per-device streams) |
+| [`docs/gpu-ecm-mixedrep.md`](docs/gpu-ecm-mixedrep.md) | **(3.2.0)** GPU twisted-Edwards mixed-representation ECM: bit-exact vs the ladder, ~1.5–2.9× (CPU already does it upstream) |
 | [`docs/gpu-prefactor.md`](docs/gpu-prefactor.md) | GPU pre-NFS ECM factoring front-end: why it sidesteps Amdahl, the multi-precision Montgomery ECM, measured CPU-vs-GPU |
 | [`docs/gpu-cofactorization.md`](docs/gpu-cofactorization.md) | GPU ECM cofactorization: measured results + honest Amdahl analysis (+ cofactor scale-out / product-tree designs) |
-| [`docs/rust-orchestration.md`](docs/rust-orchestration.md) | The Rust client/server, the work-unit protocol, and the in-process swap |
-| [`BENCHMARKS.md`](BENCHMARKS.md) | Performance sweep, per-phase breakdown, methodology, projections (incl. GPU pre-factoring + GPU linalg at scale) |
-| [`CHANGELOG.md`](CHANGELOG.md) | Everything this fork changed, with rationale (3.1.0-modern · 3.0.0-modern · 2.3.1-modern) |
+| [`docs/gpu-batch-smooth-c3.md`](docs/gpu-batch-smooth-c3.md) · [`docs/gpu-sieving-c4.md`](docs/gpu-sieving-c4.md) | **(3.2.0)** GPU batch-smoothness leaf (validated); GPU lattice-sieving feasibility (measured negative) |
+| [`docs/avx512-sieving-b1.md`](docs/avx512-sieving-b1.md) · [`docs/ifma-gfp-b3.md`](docs/ifma-gfp-b3.md) | **(3.2.0)** AVX-512 batched modular inverse for the siever; IFMA GF(p) for the BWC backend (both SDE-validated) |
+| [`docs/parallel-merge-a3.md`](docs/parallel-merge-a3.md) · [`docs/extnfs-a4.md`](docs/extnfs-a4.md) · [`docs/multinode-residency-d2.md`](docs/multinode-residency-d2.md) | **(3.2.0)** Parallel merge (already upstream, verified); exTNFS-DLP feasibility; multi-node NVSHMEM/GPUDirect residency design |
+| [`docs/rust-orchestration.md`](docs/rust-orchestration.md) | The Rust client/server, the work-unit protocol, the in-process swap, and `cluster-launch.sh` (Slurm/SSH/GPU-aware) |
+| [`BENCHMARKS.md`](BENCHMARKS.md) | Performance sweep, per-phase breakdown, methodology, projections (incl. GPU pre-factoring + GPU linalg + the 3.2.0 GPU/AVX-512 additions) |
+| [`CHANGELOG.md`](CHANGELOG.md) | Everything this fork changed, with rationale (3.2.0-modern · 3.1.0-modern · 3.0.0-modern · 2.3.1-modern) |
 | [`CLAUDE.md`](CLAUDE.md) | Build/test/run notes and the fork's internal map |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) · [`SECURITY.md`](SECURITY.md) | How to contribute here vs upstream; security-reporting policy |
 | [`README.dlp`](README.dlp) · [`README.Python`](README.Python) | Discrete logarithms; Python orchestration internals (upstream) |
