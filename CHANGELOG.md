@@ -196,6 +196,34 @@ validated-at-degenerate-path code + design.
   belongs under DLP/exTNFS (A4), not the factorization track. `docs/ROADMAP-v3.2.0-modern.md`
   updated.
 
+### CPU/SIMD (B1) — AVX-512 sieving: batched modular inverse (SDE-validated; honest scatter wall)
+
+- **Vectorized the siever's one vectorizable hot slice; confirmed the rest is a
+  scatter wall.** The c120 profile (3.1.0) puts siever self-time in `fill_in_buckets`
+  (~12%, scatter), `plattice_info` (~11%, modular arith), `sieve_small_bucket_region`
+  (~10%, byte scatter), `invmod_redc_32` (~9.5%, modular inverse), `apply_buckets_inner`
+  (~7%, scatter). **AVX-512 does not rescue the scatter loops**: the sieve array is
+  `uint8` and AVX-512 scatter is 32/64-bit-element only (no 8-bit scatter), so the
+  ~29% byte-scatter majority stays scalar — extending the 3.1.0 "AVX2-on-siever
+  ruled out" finding to AVX-512 (now with the precise reason).
+- **`bench/avx512-modinv.c`** implements `modinv16`: an **AVX-512 16-way batched
+  32-bit modular inverse** — the vectorizable arithmetic core of the per-prime
+  lattice setup (`invmod_redc_32` + `plattice_info`). `invmod_redc_32` is a
+  binary-GCD inverse mod p with a *different modulus per prime*, so Montgomery's
+  batch-inversion trick doesn't apply; instead 16 independent inverses run as a
+  **masked per-lane state machine** (`_mm512_mask_*`, looping until all lanes done)
+  — the published AVX-512 sieve-index angle (SECRYPT 2021), distinct from the
+  ruled-out AVX2 path. Computes the plain `a⁻¹ mod b` (the REDC `2⁻³²` fixup folds
+  in at integration); `b < 2³¹`.
+- **Validated bit-exact vs GMP under Intel SDE** (`bench/avx512-modinv-validate.sh`
+  + the `avx512-validate` CI): **PASS, 0 wrong / 640 000 trials**.
+- **Honest scope.** Done + validated: the batched modular inverse. Confirmed
+  un-vectorizable: the ~29% byte-scatter majority (hard memory wall). Remaining
+  (integration): batch 16 primes' `plattice_info` setups through `modinv16` (REDC
+  fixup + `b≥2³¹` scalar tail) — the invasive restructuring 3.1.0 flagged; net
+  siever speedup is Amdahl-bounded by the scatter majority and gated on real
+  AVX-512 silicon. See `docs/avx512-sieving-b1.md`.
+
 ### CPU/SIMD (B3) — AVX-512 IFMA GF(p) for the BWC backend (plain-rep, SDE-validated)
 
 - **Wired the v3.1.0 IFMA modmul toward CADO's GF(p) backend.** "mpfq" is now the

@@ -15,12 +15,14 @@ on:
       - 'gf2x/**'
       - 'bench/vpclmul-*'
       - 'bench/ifma-*'
+      - 'bench/avx512-*'
       - '.github/workflows/avx512-validate.yml'
   pull_request:
     paths:
       - 'gf2x/**'
       - 'bench/vpclmul-*'
       - 'bench/ifma-*'
+      - 'bench/avx512-*'
   workflow_dispatch:
 
 permissions:
@@ -63,6 +65,11 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y libgmp-dev
           bash bench/ifma-validate.sh
+
+      - name: Validate the AVX-512 batched modular inverse (siever, bit-exact vs GMP)
+        run: |
+          sudo apt-get update && sudo apt-get install -y libgmp-dev
+          bash bench/avx512-modinv-validate.sh
 
       - name: Regenerate gf2x configure and check VPCLMUL auto-detection
         run: |

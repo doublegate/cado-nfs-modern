@@ -80,11 +80,16 @@ kernel, real multi-GPU) it started.
 CPU tuning is nearly tapped (PGO/micro-opt rejected in 3.1.0). The real items are
 AVX-512, which this box can only validate (SDE) not perf-measure:
 
-- **B1. AVX-512 block + bucket sieving** (SciTePress/SECRYPT 2021): vectorize the
-  sieve-index calculation, sieve-array updates, and bucket insertion. A
-  *different, published AVX-512 approach* from the AVX2-on-siever path 3.1.0 ruled
-  out — and it targets the 90 % phase. Correctness-only under Intel SDE + the CI
-  gate; perf on an AVX-512 CI runner.
+- **B1. AVX-512 block + bucket sieving** (SciTePress/SECRYPT 2021). **Vectorizable
+  slice DONE; scatter wall confirmed.** AVX-512 does *not* rescue the byte-scatter
+  majority (~29%: fill_in_buckets, small-sieve, apply_buckets) — the sieve array is
+  `uint8` and AVX-512 scatter is 32/64-bit-only (no 8-bit scatter), extending the
+  3.1.0 AVX2 negative to AVX-512. The vectorizable slice — the per-prime modular
+  inverse (`invmod_redc_32`, ~9.5% + feeds plattice's 11%) — is implemented as an
+  **AVX-512 16-way masked batched modular inverse** (`bench/avx512-modinv.c`),
+  bit-exact vs GMP under SDE (0/640000). Remaining: batch `plattice_info` setups
+  through it (REDC fixup + scalar tail) — net win Amdahl-bounded by the scatter
+  majority, perf gated on AVX-512 silicon. See `docs/avx512-sieving-b1.md`.
 - **B2. Complete the AVX-512 VPCLMULQDQ gf2x port** (`mul2`–`mul9` + threshold
   retune). **mul2/mul3/mul4 DONE** — VPCLMULQDQ Karatsuba kernels (pack base
   products into the 512-bit lanes, one `_mm512_clmulepi64_epi128`, scalar fold),
@@ -198,7 +203,7 @@ Building on 3.1.0's `--json-status`, `/status`, `/dashboard`, clap CLIs, and
 | 5 | **A2** mixed-rep ECM ✓ DONE (CPU already upstream; GPU win validated) | Med | Med | feeds C3 + CPU cofactor |
 | 6 | **A3** parallel merge ✓ DONE (already upstream; verified ~3.3× @ t8) | Med | Med | cuts the high-variance filtering phase |
 | 7 | **D1** multi-GPU partition (real) | High | High | **the large-N / HPC win** (needs ≥2 GPUs) |
-| 8 | **B1/B2/B3** AVX-512 sieving + gf2x + IFMA (B2 mul2/3/4 ✓; B3 plain-rep GF(p) primitive ✓ — both SDE-validated) | Med–High | Low | AVX-512-HW-only (SDE-correct, CI-perf) |
+| 8 | **B1/B2/B3** AVX-512 sieving + gf2x + IFMA (B1 batched modinv ✓; B2 mul2/3/4 ✓; B3 plain-rep GF(p) ✓ — all SDE-validated) | Med–High | Low | AVX-512-HW-only (SDE-correct, CI-perf) |
 | 9 | **D2** NVSHMEM multi-node residency | High | High | cluster win (needs CUDA-aware MPI + multi-GPU) |
 | 10 | **C3** product-tree (leaf stage ✓ DONE; trees = big-int, CPU) · **C4 / A4** GPU-sieve study · exTNFS | High | High | research / regime-specific |
 
