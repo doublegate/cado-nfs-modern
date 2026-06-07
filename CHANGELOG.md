@@ -9,7 +9,121 @@ This is a downstream **modernization + performance fork** of upstream
 rebased onto upstream **3.0.0**; only the changes introduced by this fork are
 listed. For the upstream history see [`NEWS`](NEWS). The earlier `2.3.1-modern`
 release (rebased on upstream 2.3.0) is preserved under the `v2.3.1-modern` tag;
-`main` now tracks the latest release (`3.2.0-modern`).
+`main` tracks the latest release (`3.2.0-modern`); the **`3.3.0-modern` cycle is
+in progress** (section directly below).
+
+## [3.3.0-modern] — unreleased (in progress)
+
+The cycle after `3.2.0-modern`, opened on an honest premise the fork has now
+confirmed three times over: **on the reference hardware (i9-10850K, Comet Lake —
+AVX2 but no AVX-512; a single RTX 3090) single-machine NFS *speed* is essentially
+tapped out.** CPU tuning is saturated; GPU cofactorization is Amdahl-capped (~8 %
+of sieve → <1 % net); GPU lattice sieving is a measured negative; the AVX-512
+B-series is bit-exact under SDE but silicon-gated; multi-GPU/multi-node are
+correctness-validated only at the degenerate path. An internet survey (upstream
+CADO, msieve, YAFU, GGNFS, FLINT, GMP-ECM/CGBN, the RSA-250/DLP-240 record papers,
+2021–2026 eprint/arxiv) confirms no published technique since ~2010 yields a >5 %
+single-machine speedup, and that this fork is already ahead of public
+implementations on GPU + SIMD modernization.
+
+So `3.3.0-modern` splits its effort, deliberately and transparently, into two
+parts: **(1) a shippable, *measurable* operator-experience core** that runs and
+helps on this box today, and **(2) an honestly-gated experimental/research track**
+(explicitly requested) attempted under the standing gate (`product == N` /
+bit-exact / Intel SDE) and **documented even when the outcome is a wash or a
+HW-gated design.** Same ethos as ever: no NFS-math changes; honest negatives
+recorded, not hidden.
+
+**Planned headline (shippable, measured-on-silicon):** a live TUI dashboard with
+per-phase ETA; a `--doctor` preflight; shell completions + man pages;
+checkpoint/resume clarity; Slurm/PBS integration; the fork's **first AVX2 SIMD
+kernel that actually runs on this CPU** (a batched modular inverse — B-series
+without the SDE asterisk); and **Galois-automorphism auto-detection** (a genuine,
+measurable algorithmic win when the polynomial admits an automorphism).
+**Research track (gated, honest):** GPU polyselect stage-2 root-sieve (a win only
+at large N), GPU GF(p) lingen NTT (multi-GPU/DLP), IFMA→`arith-modp` wiring
+(DLP, HW-gated), and an exTNFS/Tower-NFS feasibility skeleton.
+
+- **Version bumped to `3.3.0-modern`** (`CMakeLists.txt` `CADO_VERSION_MINOR
+  2 → 3`); roadmap [`docs/ROADMAP-v3.3.0-modern.md`](docs/ROADMAP-v3.3.0-modern.md);
+  README/CLAUDE/BENCHMARKS updated; the §7 numbers measured 2026-06-07.
+
+### Usability / utility / help (Track E) — the shippable, measurable core
+
+- **E4 — live dashboard + ETA.** `cado-nfs-monitor-rs` gains a trailing-window
+  **ETA (trend)** + **throughput** (work-units/min) computed from its own poll
+  history, plus local **host CPU** (`/proc/stat`) and **GPU** (`nvidia-smi`)
+  utilisation. The dependency-free `/dashboard` HTML (Flask + Rust servers) mirrors
+  the trend-ETA + throughput browser-side. See `docs/usability-v330.md`.
+- **E5 — `--doctor` preflight.** `cado-nfs.py --doctor [N]` (+ `--doctor-json`):
+  a side-effect-free check of the build, CPU/SIMD, GPU, RAM/disk, Python env and
+  schedulers vs the resource estimate for `N`, with a GO / NO-GO verdict
+  (`scripts/cadofactor/doctor.py`, doctested).
+- **E6 — shell completions + man page.** bash/zsh/fish completions generated from
+  the argparse spec (`scripts/build-completions.py` → `misc/completions/`), a
+  `--completions <shell>` flag on all three Rust binaries (`clap_complete`), and a
+  `misc/man/cado-nfs.1` man page; CMake installs all of them.
+- **E7 — checkpoint/resume clarity.** Documented what is resumable per phase, and
+  surfaced the BWC krylov checkpoint cadence as a first-class
+  **`--checkpoint-interval`** knob (`tasks.linalg.bwc.interval`).
+- **E8 — Slurm/PBS integration.** A PBS/Torque `qsub` job-array path in
+  `scripts/cluster-launch.sh` beside the existing Slurm `--sbatch` (shared
+  `array_body` helper), plus **`--suggest-slurm-config` / `--suggest-pbs-config`**
+  that emit a submission script sized to `N` from the planner estimate.
+
+### Number-field math (Track A)
+
+- **A5 — Galois automorphism auto-detect (measurable win).** A new exact detector
+  (`scripts/cadofactor/galois.py`) finds whether the algebraic polynomial admits a
+  CADO automorphism (`autom2.1/2.2/3.1/3.2/4.1/6.1`) via Möbius-invariance in
+  integer arithmetic (with the `deg % order == 0` orbit guard), exposed as
+  **`cado-nfs.py --galois-detect POLYFILE`**. Cross-validated against CADO's own
+  `tests/sieve/galois.poly` fixture (`autom2.2`) and a cyclic cubic (`autom3.1`);
+  correct no-op on generic GNFS polynomials. Detection only (advisory) — the
+  matrix/sieve reduction is CADO's existing, upstream-validated `--galois` feature.
+  See `docs/galois-auto-a5.md`.
+- **A6 — exTNFS/Tower-NFS feasibility skeleton.** Extended the A4 study with
+  concrete interface sketches (tower polyselect, the (2η)-D special-q siever shape,
+  tower-ideal relation bookkeeping) — documented design, no committed tower math.
+  See `docs/extnfs-a4.md`.
+
+### SIMD (Track B)
+
+- **B4 — AVX2 batched modular inverse (first measured-on-silicon SIMD).** An AVX2
+  8-way masked binary-GCD modular inverse (`bench/avx2-modinv.c`), the per-prime
+  siever-lattice slice, ported from the SDE-only AVX-512 B1 kernel using
+  blend-based masking. Because it runs **natively** on this Comet Lake box it
+  yields the fork's first *measured* batched-modinv result: **~4.6× scalar,
+  bit-exact vs GMP (0/320000)**. Honest: Amdahl-bounded in the full siever (the
+  byte-scatter majority stays scalar). See `docs/avx2-simd-b4.md`.
+- **B5 — IFMA GF(p) → arith-modp routing bridge.** Extended `bench/ifma-gfp.c` with
+  the complete DLP routing arithmetic — radix-2^64 (arith-modp storage) ↔
+  radix-2^52 (IFMA) repack + the `vec_add_dotprod` `+w` addend — **bit-exact under
+  SDE (0/32000)**. Honest: HW-gated (no IFMA silicon here) *and* repack-sensitive at
+  p4/p5 width; the in-tree arith-modp specialization is the documented follow-up,
+  not committed. See `docs/ifma-gfp-b3.md`.
+
+### GPU (Track C)
+
+- **C5 — GPU polyselect stage-2 root-sieve.** `bench/gpu-ropt-stage2.cu` models the
+  root-sieve core (`rootsieve_run_line`) as an int32-accumulate scatter,
+  **bit-exact vs the int16 CPU reference (0 wrong)** over a 4 M-cell line;
+  ~1.7× on the raw apply step but an honest **wash** at testable sizes (real `ropt`
+  sieves small per-rotation arrays — PCIe/launch-bound), the win being large-N only.
+  See `docs/gpu-polyselect-ropt-c5.md`.
+- **C6 — GPU GF(p) lingen NTT.** `bench/gpu-lingen-ntt.cu`: an iterative
+  Cooley–Tukey NTT polynomial multiply over a 31-bit NTT prime, **bit-exact vs
+  schoolbook (0/1199)**, ~0.5 ms for degree-2^16 (NTT size 2^17). Honest: the
+  single-prime inner transform of a multi-modular GF(p) lingen, and lingen is
+  ~3–8 % of BWC, so <1 % single-machine net — a multi-GPU/cluster-DLP play. See
+  `docs/gpu-lingen-ntt-c6.md`.
+
+### Honest findings (recorded, not hidden)
+
+- Single-machine NFS *speed* is essentially tapped out on this hardware; the
+  measurable v3.3.0 wins are the operator experience (Track E), the **AVX2 modinv**
+  (B4, real silicon), and **Galois detection** (A5). C5/C6/B5 are research/HW-gated,
+  documented with measured kernels but honest non-wins on one desktop.
 
 ## [3.2.0-modern] — 2026-06-07
 

@@ -1,4 +1,4 @@
-# CADO-NFS 3.2.0-modern
+# CADO-NFS 3.3.0-modern
 
 A **modernization + performance fork** of
 [CADO-NFS](https://gitlab.inria.fr/cado-nfs/cado-nfs) — a complete
@@ -22,6 +22,16 @@ logarithms in finite fields.
 > orchestration** (Slurm job arrays, GPU-aware placement), and a **factor planner +
 > per-host autotuner** — on top of the 3.1.0 GPU-linalg / GPU-prefactor / AVX-512 /
 > orchestration tracks and the 3.0.0-modern build/SIMD/GPU-cofactor/Rust base.
+> **3.3.0-modern** opens on the honest premise the fork has now confirmed three
+> times — single-machine NFS *speed* is essentially tapped out on this hardware —
+> and pivots accordingly: a shippable **operator-experience core** (a live
+> dashboard + trend-ETA, a **`--doctor`** preflight, shell completions + man pages,
+> checkpoint/resume clarity, **Slurm/PBS** integration), the fork's **first
+> measured-on-silicon SIMD** kernel (**AVX2 batched modular inverse, ~4.6×**,
+> bit-exact), **Galois-automorphism auto-detection** (a genuine, measurable algo
+> win), plus an honestly-gated GPU/DLP research track (GPU root-sieve, GPU GF(p)
+> lingen NTT, IFMA→arith-modp routing, an exTNFS skeleton) — each a validated,
+> measured kernel reported with its honest non-win where it is one.
 > Every change is gated on `make check` + verified `product == N` (or a bit-exact /
 > SDE validation); hardware-blocked items (multi-GPU/multi-node, AVX-512 perf) ship
 > as documented designs or correctness-validated kernels, not unvalidated claims.
@@ -30,13 +40,14 @@ logarithms in finite fields.
 >
 > This is **not** the official CADO-NFS. For releases, ongoing development, and
 > support, use the upstream project (links at the bottom). Earlier releases are
-> preserved under their tags: `2.3.1-modern`, `v3.0.0-modern`, `v3.1.0-modern`.
+> preserved under their tags: `2.3.1-modern`, `v3.0.0-modern`, `v3.1.0-modern`,
+> `v3.2.0-modern`.
 
 [![CI](https://github.com/doublegate/cado-nfs-modern/actions/workflows/ci.yml/badge.svg)](https://github.com/doublegate/cado-nfs-modern/actions/workflows/ci.yml)
 [![AVX-512 validation](https://github.com/doublegate/cado-nfs-modern/actions/workflows/avx512-validate.yml/badge.svg)](https://github.com/doublegate/cado-nfs-modern/actions/workflows/avx512-validate.yml)
 [![License: LGPL-2.1](https://img.shields.io/badge/License-LGPL%202.1-blue.svg)](COPYING)
 [![Upstream: 3.0.0](https://img.shields.io/badge/upstream-CADO--NFS%203.0.0-informational.svg)](https://gitlab.inria.fr/cado-nfs/cado-nfs)
-[![Release: 3.2.0-modern](https://img.shields.io/badge/release-3.2.0--modern-success.svg)](https://github.com/doublegate/cado-nfs-modern/releases/tag/v3.2.0-modern)
+[![Release: 3.3.0-modern](https://img.shields.io/badge/release-3.3.0--modern-success.svg)](https://github.com/doublegate/cado-nfs-modern/releases/tag/v3.3.0-modern)
 
 **Jump to:** [Quick start](#quick-start) · [Performance](#performance) ·
 [What this fork changes](#what-this-fork-changes-vs-upstream-300) ·
@@ -170,6 +181,22 @@ that, this fork adds four independently-validated tracks:
 | **2 · SIMD** | AVX2 on the siever profiled; an AVX-512 **VPCLMULQDQ** gf2x base-case kernel added | AVX2 ruled out (the hot path is scatter + scalar modarith, not vectorizable). The gf2x kernel is **validated bit-exact** under Intel SDE; perf is gated on real AVX-512 silicon (the reference box is Comet Lake). |
 | **3 · GPU ECM cofactorization** | A batched CUDA ECM backend (`sieve/ecm/gpu/`) behind `facul`/`las-cofactor`, validated bit-exact vs the CPU path | The GPU modmul primitive is ~39× a 20-core CPU — but cofactorization is only ~8 % of siever time, so **honestly, no net single-machine speedup at these sizes** (Amdahl-bounded). Documented as a measured negative, not an unsubstantiated win. |
 | **4 · Rust orchestration** | The `rust/` workspace — a static-binary work-unit **client** and an async **server**, same HTTP/JSON protocol + `wudb` SQLite schema | Interoperates with an unmodified `cado-nfs.py`; the Rust server can be **swapped in** for the Flask server live (`CADO_RUST_WU_SERVER=…`), with TLS, IP-whitelist, and cert-pinning. For multi-client robustness, not single-machine speed. |
+
+### New in 3.3.0-modern
+
+3.3.0 opens on the conclusion the prior three revisions measured repeatedly:
+**single-machine NFS *speed* is essentially tapped out on this hardware** (Comet
+Lake i9-10850K — AVX2, no AVX-512; one RTX 3090). So it splits, transparently, into
+a **shippable operator-experience core** (the real, here-and-now value) and an
+**honestly-gated research track** — each item validated and *measured*, reported
+with its honest non-win where it is one.
+
+| Track | What | Result |
+|-------|------|--------|
+| **Usability core (E4–E8)** | A live TUI dashboard with **trailing-window ETA** + throughput + host CPU/GPU; a **`--doctor`** preflight (build/GPU/CPU/RAM/disk/env → GO·NO-GO); **shell completions** (bash/zsh/fish) + a **man page**; **`--checkpoint-interval`**; **Slurm/PBS** integration + **`--suggest-{slurm,pbs}-config`** | All runs on this box today; the genuine high-ROI center. `doctor.py` doctested; completions generated from the argparse spec; PBS mirrors the existing Slurm `sbatch`. |
+| **AVX2 modinv (B4)** | The siever's per-prime modular inverse as an **AVX2 8-way** masked binary-GCD (`bench/avx2-modinv.c`), ported from the SDE-only AVX-512 B1 kernel | The fork's **first measured-on-silicon SIMD**: **~4.6× scalar**, bit-exact vs GMP (0/320000), **native** (no SDE). Honest: Amdahl-bounded whole-siever (the byte-scatter majority stays scalar). |
+| **Galois auto-detect (A5)** | An exact automorphism detector (`galois.py`) — Möbius-invariance in integer arithmetic with the orbit guard — exposed as **`--galois-detect`** | Cross-validated against CADO's own `tests/sieve/galois.poly` (`autom2.2`) and a cyclic cubic (`autom3.1`); correct no-op on generic GNFS. The matrix/sieve reduction is CADO's upstream `--galois`. |
+| **Research track (C5/C6/B5/A6)** | GPU stage-2 root-sieve; GPU GF(p) lingen **NTT**; the **IFMA→arith-modp** routing bridge; an **exTNFS** feasibility skeleton | All validated bit-exact (C5 0-wrong vs int16; C6 0/1199 vs schoolbook; B5 0/32000 under SDE) and **honestly scoped**: C5 is a per-rotation wash at testable sizes, C6/B5 are multi-GPU/DLP/HW-gated, A6 is documented design only. |
 
 ### New in 3.2.0-modern
 

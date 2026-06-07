@@ -77,6 +77,95 @@ Adding (ex)TNFS is **not** a localized change — it touches every NFS stage:
   enumeration is the TNFS siever, not a factorization win); any future pursuit of
   GF(p^6)/GF(p^12) DLP would start from §"component gap analysis" above.
 
+## A6 — feasibility skeleton (v3.3.0-modern): concrete interfaces
+
+A4 gave the gap analysis; **A6 sketches the *interfaces*** a future implementation
+would add, to make the size of each piece concrete. This is a **documented design,
+not committed code** — no tower math enters the tree. Each block shows how the
+existing 2-D CADO structure generalizes; file references are the real anchors.
+
+### 1. Tower field + tower polynomial selection
+
+The classic side has a single polynomial pair `(f0, f1) ∈ Z[x]`. The tower replaces
+`Z` by `Z[ι]/h(ι)` and the pair becomes bivariate in `(ι, x)`:
+
+```text
+struct tower_field {                 // generalizes the (p, f0, f1) of polyselect
+    cxx_mpz       p;                 // characteristic
+    cxx_mpz_poly  h;                 // deg η, irreducible mod p — defines Z[ι]/h
+    int           eta;               // = deg h  (eta=1 ⇒ classic NFS-DLP)
+    int           kappa;             // target extension: n = eta * kappa, gcd=1
+    // the two sides, each an element of (Z[ι]/h)[x]:
+    cxx_mpz_poly  f0[ /*eta*/ ];     // f_s(x) = sum_j (coeff in Z[ι]/h) x^j
+    cxx_mpz_poly  f1[ /*eta*/ ];     // sharing a common irreducible deg-κ factor mod p
+};
+
+// tower_polyselect(): choose h, then lift JL / Conjugation / Sarkar–Singh to the
+//   tower so f0,f1 share a degree-κ factor over GF(p^eta). Determines total cost.
+//   Anchor to generalize: polyselect/, parameters/dlp/{Joux-Lercier,TwoQuadratics}.
+int tower_polyselect(tower_field & T, cxx_mpz const & p, int n);
+```
+
+### 2. The ≥3-D special-q siever shape
+
+The classic q-lattice has **two** basis vectors and survivors map `(i,j) → (a,b)`.
+On the tower a relation is `a(ι) + b(ι)·x` with `a,b ∈ Z[ι]/h` of degree `< η`, so
+the enumeration vector has `2η` integer coordinates ⇒ **(2η)-D** (η=1 ⇒ the
+existing 2-D siever; η=2 ⇒ 4-D, etc. — A1's d-D enumeration):
+
+```text
+struct tower_qlattice {              // generalizes sieve/ q-lattice (2 -> 2η basis)
+    tower_ideal   special_q;         // q is now a tower ideal (below)
+    int64_t       basis[2*ETA][2*ETA]; // reduced lattice basis, dim 2η
+};
+
+// survivor coordinates -> tower relation: (i_0..i_{η-1}, j_0..j_{η-1}) -> (a(ι),b(ι))
+void tower_ij_to_ab(tower_relation & r,
+                    int64_t const i_vec[ETA], int64_t const j_vec[ETA],
+                    tower_qlattice const & L);
+
+// the inner sieve: enumerate the (2η)-D box, accumulate per-ideal log-norms.
+//   Anchor + the hard part: a new siever; sieve/las.cpp + bucket geometry are 2-D.
+//   The bucket region, the (i,j) line sieve, and SIMD/GPU layout all assume 2-D.
+```
+
+The bucket-sieve geometry (`sieve/`), the `fill_in_buckets` scatter, and the
+AVX2/AVX-512 modular-inverse work (B1/B4) are all 2-D-shaped; none survive the
+dimensional lift unchanged — this is why A4 calls the siever "the largest single
+piece."
+
+### 3. Tower-ideal + relation bookkeeping
+
+```text
+struct tower_ideal {                 // generalizes a (p, r) prime ideal
+    cxx_mpz       norm_p;            // rational prime below
+    cxx_mpz_poly  root_mod;          // the ideal's residue data over Z[ι]/h
+    int           side;
+};
+
+struct tower_relation {              // generalizes sieve/ las relation (a,b)+factors
+    cxx_mpz_poly  a, b;              // a(ι), b(ι) ∈ Z[ι]/h  (deg < η)
+    std::vector<tower_ideal> factors[2];
+};
+
+// norm over the tower: Res_x( f_s(x), a(ι)+b(ι)x ) then Res_ι( ·, h(ι) ) — a
+// nested resultant, not the single Z-resultant of classic NFS.
+void tower_norm(cxx_mpz & N, tower_relation const & r, tower_field const & T, int side);
+```
+
+Filtering (`filter/`) and the virtual-log / Schirokauer-map reconstruction
+(`reconstructlog`, `sqrt/`) consume the relation/ideal format, so they generalize
+pervasively; **BWC linear algebra over GF(ℓ) is reusable as-is** (field-agnostic),
+which is why A4 scopes it out of the tower-specific work.
+
+### Honest verdict (unchanged)
+
+The skeleton confirms A4's sizing: `tower_polyselect` and a `(2η)-D` siever are the
+determining pieces, both research-grade and well outside the fork's measured-win
+tracks. A6 commits **only** these interface sketches — no tower arithmetic, no
+siever — so the avenue is concretely documented for a future effort without adding
+unvalidated math to the tree.
+
 ## Sources
 
 - Barbulescu, Gaudry, Kleinjung. *The Tower Number Field Sieve.* ASIACRYPT 2015

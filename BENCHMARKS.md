@@ -257,7 +257,53 @@ dispatches adaptively (vec16 when L2-resident, warp otherwise):
 
 ---
 
-## 7. Reproducing
+## 7. v3.3.0 additions (measured 2026-06-07)
+
+The honest v3.3.0 frame: single-machine *speed* is tapped out, so the measurable
+wins are the operator experience (Track E, not timed here) plus two algorithm
+kernels that run on **this** hardware. C5/C6/B5 are research/HW-gated — measured
+kernels, honest non-wins on one desktop.
+
+### 7.1 AVX2 batched modular inverse — measured on the silicon (B4)
+
+The first fork SIMD kernel that runs **natively** (Comet Lake has AVX2). The
+siever's per-prime 32-bit modular inverse, 8-way AVX2 masked binary-GCD
+(`bench/avx2-modinv.c`):
+
+| | ns / inverse | over 2^20 inverses |
+|---|---|---|
+| scalar binary-GCD | ~193 | 0.203 s |
+| **AVX2 8-way** | **~42** | 0.044 s |
+| **speedup** | **~4.6×** | bit-exact vs GMP (0/320000) |
+
+Honest: Amdahl-bounded end-to-end — the siever's byte-scatter majority (~29 %)
+stays scalar, so the whole-siever ceiling is ~1.05–1.10× even at 4.6× on this slice.
+
+### 7.2 GPU root-sieve (C5) & GPU GF(p) lingen NTT (C6)
+
+- **C5** (`bench/gpu-ropt-stage2.cu`): the stage-2 root sieve
+  (`rootsieve_run_line`) as an int32-accumulate scatter, **bit-exact vs the int16
+  CPU reference (0 wrong)** over a 4 M-cell line; ~1.7× on the raw apply step but an
+  **honest wash** at testable sizes (real `ropt` sieves small per-rotation arrays →
+  PCIe/launch-bound). Win is large-N only.
+- **C6** (`bench/gpu-lingen-ntt.cu`): iterative Cooley–Tukey NTT polynomial multiply
+  over a 31-bit NTT prime, **bit-exact vs schoolbook (0/1199)**, ~0.5 ms for a
+  degree-2^16 × degree-2^16 product (NTT size 2^17). The single-prime inner
+  transform of a multi-modular GF(p) lingen; lingen is ~3–8 % of BWC so <1 %
+  single-machine net — multi-GPU/cluster DLP only.
+
+### 7.3 AVX2/Galois/IFMA correctness (gated)
+
+- **B5** (`bench/ifma-gfp.c`, under Intel SDE): the IFMA GF(p) routing path —
+  radix-2^64↔2^52 bridge + the `vec_add_dotprod` `+w` addend — **bit-exact vs GMP,
+  0/32000** (260-bit, 8-way). Perf HW-gated (no IFMA silicon) + repack-sensitive.
+- **A5** (`scripts/cadofactor/galois.py`): exact automorphism detection,
+  cross-validated against CADO's `tests/sieve/galois.poly` (`autom2.2`); the
+  matrix/sieve reduction is CADO's upstream `--galois`.
+
+---
+
+## 8. Reproducing
 
 ```bash
 # one-time: create the Flask/requests venv the 3.0.0 orchestrator needs
@@ -290,6 +336,13 @@ nvcc -arch=sm_86 -O3 bench/gpu-batch-smooth.cu -lgmp -o gpu-batch-smooth && ./gp
 nvcc -arch=sm_86 -O3 -Xcompiler -fopenmp bench/gpu-sieve-scatter.cu -o gpu-sieve-scatter && ./gpu-sieve-scatter  # C4
 # multi-GPU partition end-to-end (needs -DENABLE_GPU=ON), bit-exact product==N:
 CADO_GPU_NPART=2 $PY ./cado-nfs.py <c90> tasks.linalg.bwc.mm_impl=gpu -t 8       # D1
+
+# 7. v3.3.0 additions
+bash bench/avx2-modinv-validate.sh                                              # B4 (native, AVX2)
+nvcc -arch=sm_86 -O3 bench/gpu-ropt-stage2.cu -o gpu-ropt-stage2 && ./gpu-ropt-stage2     # C5
+nvcc -arch=sm_86 -O3 bench/gpu-lingen-ntt.cu -o gpu-lingen-ntt && ./gpu-lingen-ntt        # C6
+bash bench/ifma-validate.sh                                                     # B5 (extended; SDE)
+$PY ./cado-nfs.py --doctor <N>            # E5 preflight; --galois-detect FILE   # A5
 ```
 
 _CPU/3.1.0 numbers re-confirmed 2026-06-06; the §6 3.2.0 additions measured

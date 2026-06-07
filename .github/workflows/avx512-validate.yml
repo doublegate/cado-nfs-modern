@@ -1,4 +1,4 @@
-name: AVX-512 gf2x validation
+name: SIMD validation (AVX-512 SDE + AVX2 native)
 
 # Correctness-only validation of the AVX-512 VPCLMULQDQ gf2x backend
 # (Track 1.1). GitHub's stock runners are not guaranteed to expose AVX-512, and
@@ -16,6 +16,7 @@ on:
       - 'bench/vpclmul-*'
       - 'bench/ifma-*'
       - 'bench/avx512-*'
+      - 'bench/avx2-*'
       - '.github/workflows/avx512-validate.yml'
   pull_request:
     paths:
@@ -23,6 +24,7 @@ on:
       - 'bench/vpclmul-*'
       - 'bench/ifma-*'
       - 'bench/avx512-*'
+      - 'bench/avx2-*'
   workflow_dispatch:
 
 permissions:
@@ -98,3 +100,17 @@ jobs:
           grep -E 'hwdir=' cfg.log | tail -1
           make -j"$(nproc)"
           make check LOG_COMPILER="$SDE -future --"
+
+  avx2-modinv:
+    name: AVX2 batched modinv bit-exact + measured (native, B4)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      # GitHub's x86-64 runners expose AVX2, so unlike the AVX-512 work this runs
+      # NATIVELY (no SDE) and reports a real measured scalar-vs-AVX2 speedup
+      # alongside the bit-exact-vs-GMP check. If a runner lacks AVX2 the validate
+      # script builds and skips the run rather than SIGILL.
+      - name: Validate the AVX2 8-way modular inverse (Roadmap B4)
+        run: |
+          sudo apt-get update && sudo apt-get install -y libgmp-dev
+          bash bench/avx2-modinv-validate.sh
