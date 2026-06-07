@@ -196,6 +196,30 @@ validated-at-degenerate-path code + design.
   belongs under DLP/exTNFS (A4), not the factorization track. `docs/ROADMAP-v3.2.0-modern.md`
   updated.
 
+### GPU (C3) — batch-smoothness leaf extraction (validated, reuses A2; honest scope)
+
+- **The A2-reusable part of GPU batch smoothness, done and validated.** CADO's
+  `sieve/ecm/batch.cpp` is Bernstein batch smoothness (Alg. 7.1): a product tree +
+  remainder tree giving `P mod R[j]` (P = ∏ primes ≤ 2^lpb), then per-leaf
+  smooth-part extraction. The **trees are big-integer (CPU/GMP)**; the **leaf
+  extraction fans out to n bounded-width cofactors** and is the only part that
+  fits the fixed-K-limb Montgomery arithmetic from the GPU ECM (A2).
+- **`bench/gpu-batch-smooth.cu`** implements the leaf stage by Bernstein's powering
+  variant — `s = gcd(R, (P mod R)^(2^e) mod R)` — reusing the A2 `montmul` for the
+  `e` modular squarings (no big-integer division; and since `gcd(R, y·2^{64K}) =
+  gcd(R, y)` for odd R, the gcd runs directly on the Montgomery-form result).
+  **Validated bit-exact vs an independent GMP ground truth** — both the smooth part
+  and the smooth/rough classification: **PASS, 0/8192 at 128/256/512-bit**.
+  Throughput 20.6 / 1.45 / 1.60 Mleaf/s; 7/8/9 Montgomery squarings + gcd per leaf.
+- **Honest scope.** The leaf stage is cheap by design (~0.05–0.7 µs/leaf); the
+  batch-smoothness bottleneck is the **big-integer remainder tree**, which is
+  arbitrary-precision and stays on CPU/GMP — *not* expressible in A2's fixed-width
+  arithmetic. A full GPU batch-smoothness path would need the product/remainder
+  trees ported to GPU big-integer multiply/division (a separate, substantial
+  effort; documented design, not committed unvalidated). For GPU cofactorization
+  overall, **ECM (A2) remains the better single-machine fit** (fixed-width, no
+  trees; just made ~1.5–2.9× faster). See `docs/gpu-batch-smooth-c3.md`.
+
 ### Algorithm (A3) — parallel structured Gaussian elimination (merge): already upstream (verified)
 
 - **A3 is already implemented upstream (honest finding).** `filter/merge.cpp` *is*

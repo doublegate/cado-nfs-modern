@@ -103,10 +103,16 @@ AVX-512, which this box can only validate (SDE) not perf-measure:
   since 2009); CADO lacks it. Polyselect grows with N and is embarrassingly
   parallel — a clean single-machine GPU win, reusing the 3.1.0 multi-precision
   device arithmetic. Gate: same polynomial quality (Murphy-E) as the CPU path.
-- **C3. GPU batch-smoothness product tree** (the 3.1.0 documented design;
-  Bernstein remainder tree). Flag-gated alternative to per-cofactor ECM in heavy-
-  `mfb` regimes; reuses the validated device arithmetic (`bench/gpu-ecm-mp.cu`,
-  `bench/ifma-modmul.c`). Bit-exact relation-set gate.
+- **C3. GPU batch-smoothness product tree** (Bernstein remainder tree).
+  **PARTLY DONE — A2-reusable leaf stage validated.** The leaf extraction
+  (`s = gcd(R, (P mod R)^(2^e) mod R)`, reusing A2 `montmul`) is implemented and
+  bit-exact vs GMP (`bench/gpu-batch-smooth.cu`, 0/8192 at 128/256/512-bit,
+  20.6/1.45/1.60 Mleaf/s). Honest finding: the leaf is cheap and the only
+  A2-arithmetic fit; the batch-smoothness bottleneck is the **big-integer
+  product/remainder tree** (CPU/GMP, `sieve/ecm/batch.cpp`), whose GPU port needs
+  arbitrary-precision multiply/division (separate large effort, not an A2 reuse).
+  For GPU cofactorization, ECM (A2) is the better single-machine fit. See
+  `docs/gpu-batch-smooth-c3.md`.
 - **C4. (research) GPU sieving feasibility study.** Honest: NFS lattice sieving is
   memory-scatter-bound and largely unsolved on GPU (the "GPU tensor-core lattice
   sieving" work is for lattice *cryptanalysis*, a different problem). Scope as a
@@ -183,7 +189,7 @@ Building on 3.1.0's `--json-status`, `/status`, `/dashboard`, clap CLIs, and
 | 7 | **D1** multi-GPU partition (real) | High | High | **the large-N / HPC win** (needs ≥2 GPUs) |
 | 8 | **B1/B2/B3** AVX-512 sieving + gf2x + IFMA | Med–High | Low | AVX-512-HW-only (SDE-correct, CI-perf) |
 | 9 | **D2** NVSHMEM multi-node residency | High | High | cluster win (needs CUDA-aware MPI + multi-GPU) |
-| 10 | **C3 / C4 / A4** product-tree · GPU-sieve study · exTNFS | High | High | research / regime-specific |
+| 10 | **C3** product-tree (leaf stage ✓ DONE; trees = big-int, CPU) · **C4 / A4** GPU-sieve study · exTNFS | High | High | research / regime-specific |
 
 **Net north star:** put the GPU + algorithm effort where the cost actually is —
 **polynomial selection (C2) and sieving (A1, B1, D3)** — plus a **faster SpMV
