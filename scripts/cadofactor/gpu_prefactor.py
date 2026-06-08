@@ -1,11 +1,19 @@
 """
-GPU pre-NFS factoring stage for cado-nfs.py (v3.1.0-modern, Track 2.1).
+GPU pre-NFS factoring stage for cado-nfs.py (v3.1.0-modern, Track 2.1;
+v3.4.0-modern Track C7).
 
 Runs the misc/gpu_prefactor `gpu-prefactor` binary (built only with
 -DENABLE_GPU=ON) to strip small/medium factors from N on the GPU before NFS.
 Returns the prime factors stripped and the remaining cofactor; cado-nfs.py then
 either reports a complete factorization (skipping NFS) or continues NFS on the
 reduced cofactor. Pure-Python, no third-party deps.
+
+As of v3.4.0 (Track C7) the binary also runs cheap Pollard P-1 / Williams P+1
+pre-passes beside the batched ECM (catching p-/+1-smooth factors the ECM curve
+count can miss) and skips the ECM batch at a given B1 once the cofactor is
+prime/1; this is transparent here (the "factors stripped:" output is unchanged,
+and the parser below already trusts any prime divisor). Set the environment
+variable CADO_PREFACTOR_NOPM1PP1=1 to restrict the binary to ECM only.
 """
 
 import os

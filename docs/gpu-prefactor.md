@@ -131,8 +131,14 @@ and the build lines are in `BENCHMARKS.md`.
   device `-O3`, `sm_86`); the `cado-nfs.py --gpu-prefactor` integration
   (fast-path skip + cofactor continuation); the escalating-`B1` staged schedule;
   and the CPU-vs-GPU benchmark. End-to-end `product == N` confirmed.
-- **Next (Track 2.1, optional):** per-cofactor adaptive curve counts; exposing the
-  staged schedule directly through `cado-nfs.py --gpu-prefactor`; and (Track 2.3)
+- **v3.4.0 (Track C7):** Pollard **P-1** and Williams **P+1** added beside the ECM,
+  on the same Montgomery core, with an adaptive escalating-B1 schedule that runs the
+  cheap one-lane P-1/P+1 first and **skips the ECM batch** once the cofactor is
+  prime/1 (~3.3× faster time-to-strip on a p-1-smooth factor; ~30 ms cost when they
+  find nothing). Bit-exact vs CPU and GMP. See
+  [gpu-prefactor-pm1pp1-c7.md](gpu-prefactor-pm1pp1-c7.md).
+- **Next (optional):** per-cofactor adaptive curve counts; exposing the staged
+  schedule directly through `cado-nfs.py --gpu-prefactor`; and (Track 2.3)
   distributing the curve batch across cluster GPUs for a DLP-scale front-end.
 
 Reach today: ~20–30-digit factors via `staged`; raising `B1`/`B2`/`curves`

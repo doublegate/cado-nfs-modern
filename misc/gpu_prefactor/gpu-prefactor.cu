@@ -15,8 +15,14 @@
  *   nvcc -arch=sm_86 -O3 misc/gpu_prefactor/gpu-prefactor.cu -lgmp -o gpu-prefactor
  *   ./gpu-prefactor <N> [B1=50000] [curves=4096]
  *
- * Stage-1 only for now (stage-2 BSGS, Suyama-sigma, and multi-GPU are the next
- * Track 2.1 increments). Exit code 0 if at least one factor was stripped.
+ * The ECM path runs Suyama-sigma curves, stage-1 + stage-2 BSGS, across all visible
+ * GPUs. v3.4.0 (Track C7) adds Pollard P-1 and Williams P+1 (gpu_pm1_pp1.cuh) as
+ * cheap pre-passes that share the same Montgomery arithmetic: at each B1 level they
+ * run first (one sequence each, so a coverage win — they catch p-/+1-smooth factors
+ * the ECM curve count can miss — not a throughput win) and, if they already reduce
+ * the cofactor to a prime/1, the expensive ECM batch at that level is skipped (the
+ * adaptive escalating-B1 schedule). Set CADO_PREFACTOR_NOPM1PP1=1 to disable them.
+ * Exit code 0 if at least one factor was stripped.
  */
 #include <cstdio>
 #include <cstdlib>
@@ -26,6 +32,13 @@
 #include <chrono>
 #include <gmp.h>
 #include "gpu_ecm_mp.cuh"
+#include "gpu_pm1_pp1.cuh"
+
+/* Track C7 toggles (P-1/P+1 default on; one GPU, few lanes — coverage, not
+ * throughput). CADO_PREFACTOR_NOPM1PP1=1 disables them entirely. */
+static bool g_use_pm1pp1 = true;
+static const unsigned g_pm1_bases[] = {2,3,5,7};        /* distinct P-1 bases   */
+static const unsigned g_pp1_seeds[] = {3,5,7,11,13,17}; /* distinct P+1 V_1 seeds (avoid 2: degenerate) */
 
 static u64 ninv64(u64 n){ u64 x=n; for(int i=0;i<5;i++) x*=2-n*x; return (u64)0-x; }
 
@@ -178,8 +191,99 @@ static bool ecm_pass(const mpz_t N, int ncurves,
     return any;
 }
 
-/* one stage at (B1,B2): sieve, pick K from the current modulus size, run ECM,
- * append found prime factors of `mod`. Returns 1 if any found, -1 if too big. */
+/* One GPU P-1 (pp1=false) or P+1 (pp1=true) pass over `nlanes` distinct bases/seeds
+ * at width K; append any nontrivial factor of N. Cheap (one sequence per lane) — a
+ * coverage pre-pass for the ECM batch, not a throughput play. Bit-exact self-checked
+ * vs the host path, like ecm_pass. (Track C7; gpu_pm1_pp1.cuh.) */
+template<int K>
+static bool pm1pp1_pass(bool pp1, const mpz_t N, const unsigned *bs, int nlanes,
+                        const std::vector<u64>&spow, const std::vector<u64>&pr,
+                        std::vector<std::string>&found){
+    if(nlanes<1) return false;
+    int ns=(int)spow.size(), npr=(int)pr.size();
+    u64 Nl[K]; to_limbs(Nl,K,N); u64 np=ninv64(Nl[0]);
+    mpz_t t,R1m,R2m,g,z; mpz_inits(t,R1m,R2m,g,z,NULL);
+    mpz_setbit(t,64*K); mpz_mod(R1m,t,N);
+    mpz_set_ui(t,0); mpz_setbit(t,128*K); mpz_mod(R2m,t,N);
+    u64 R1[K],R2[K]; to_limbs(R1,K,R1m); to_limbs(R2,K,R2m);
+    std::vector<u64> Nv(nlanes*K),R1v(nlanes*K),R2v(nlanes*K),NPv(nlanes),BS(nlanes*K);
+    for(int i=0;i<nlanes;i++){ mp_copy<K>(&Nv[i*K],Nl); mp_copy<K>(&R1v[i*K],R1);
+        mp_copy<K>(&R2v[i*K],R2); NPv[i]=np;
+        mpz_t b; mpz_init_set_ui(b,bs[i]); to_limbs(&BS[i*K],K,b); mpz_clear(b); }
+    std::vector<u64> G1(nlanes*K),G2(nlanes*K);
+    u64 *dN,*dNP,*dR1,*dR2,*dBS,*ds,*dpr,*dG1,*dG2; size_t cb=(size_t)nlanes*K*8;
+    cudaMalloc(&dN,cb);cudaMalloc(&dNP,nlanes*8);cudaMalloc(&dR1,cb);cudaMalloc(&dR2,cb);
+    cudaMalloc(&dBS,cb);cudaMalloc(&dG1,cb);cudaMalloc(&dG2,cb);
+    cudaMalloc(&ds,ns>0?ns*8:8);cudaMalloc(&dpr,npr>0?npr*8:8);
+    cudaMemcpy(dN,Nv.data(),cb,cudaMemcpyHostToDevice);
+    cudaMemcpy(dNP,NPv.data(),nlanes*8,cudaMemcpyHostToDevice);
+    cudaMemcpy(dR1,R1v.data(),cb,cudaMemcpyHostToDevice);
+    cudaMemcpy(dR2,R2v.data(),cb,cudaMemcpyHostToDevice);
+    cudaMemcpy(dBS,BS.data(),cb,cudaMemcpyHostToDevice);
+    if(ns>0) cudaMemcpy(ds,spow.data(),ns*8,cudaMemcpyHostToDevice);
+    if(npr>0) cudaMemcpy(dpr,pr.data(),npr*8,cudaMemcpyHostToDevice);
+    int tpb=32, blk=(nlanes+tpb-1)/tpb;
+    if(pp1) pp1_kernel<K><<<blk,tpb>>>(dN,dNP,dR1,dR2,dBS,ds,ns,dpr,npr,dG1,dG2,nlanes);
+    else    pm1_kernel<K><<<blk,tpb>>>(dN,dNP,dR1,dR2,dBS,ds,ns,dpr,npr,dG1,dG2,nlanes);
+    cudaMemcpy(G1.data(),dG1,cb,cudaMemcpyDeviceToHost);
+    cudaMemcpy(G2.data(),dG2,cb,cudaMemcpyDeviceToHost);
+    cudaDeviceSynchronize(); bool ok=(cudaGetLastError()==cudaSuccess);
+    cudaFree(dN);cudaFree(dNP);cudaFree(dR1);cudaFree(dR2);cudaFree(dBS);
+    cudaFree(dG1);cudaFree(dG2);cudaFree(ds);cudaFree(dpr);
+    long mis=0; if(ok){
+        for(int i=0;i<nlanes;i++){ u64 h1[K],h2[K],bsl[K];
+            mpz_t b; mpz_init_set_ui(b,bs[i]); to_limbs(bsl,K,b); mpz_clear(b);
+            if(pp1) pp1_run<K>(h1,h2,&Nv[i*K],NPv[i],&R1v[i*K],&R2v[i*K],bsl,spow.data(),ns,pr.data(),npr);
+            else    pm1_run<K>(h1,h2,&Nv[i*K],NPv[i],&R1v[i*K],&R2v[i*K],bsl,spow.data(),ns,pr.data(),npr);
+            for(int j=0;j<K;j++) if(h1[j]!=G1[i*K+j]||h2[j]!=G2[i*K+j]){ mis++; break; } }
+        printf("# %s selfcheck: %s (%ld/%d GPU lanes differ from CPU)\n",
+               pp1?"pp1":"pm1", mis==0?"PASS":"FAIL", mis, nlanes);
+        if(mis) ok=false;
+    }
+    bool any=false;
+    auto add_factor=[&](const mpz_t f){ if(mpz_cmp_ui(f,1)>0 && mpz_cmp(f,N)<0){
+        char*s=mpz_get_str(NULL,10,f); std::string fac(s); free(s);
+        for(auto&x:found) if(x==fac) return; found.push_back(fac); any=true; } };
+    if(ok) for(int i=0;i<nlanes;i++){
+        from_limbs(z,&G1[i*K],K);
+        if(!pp1){ mpz_sub_ui(z,z,1); mpz_mod(z,z,N); }   /* P-1: gcd(base^E - 1, N) */
+        mpz_gcd(g,z,N); add_factor(g);                   /* P+1: g1out is already V_E - 2 */
+        from_limbs(z,&G2[i*K],K); mpz_gcd(g,z,N); add_factor(g);   /* stage 2 */
+    }
+    mpz_clears(t,R1m,R2m,g,z,NULL);
+    return any;
+}
+
+/* run one width: cheap P-1/P+1 coverage pre-passes (Track C7), then ECM. If the
+ * pre-passes already leave a prime/1 cofactor, the ECM batch is skipped at this B1
+ * (the adaptive escalating-B1 schedule). */
+template<int K>
+static bool run_stage_K(const mpz_t mod, int curves,
+                        const std::vector<u64>&spow, const std::vector<u64>&pr,
+                        std::vector<std::string>&found, double &cps){
+    bool any=false;
+    if(g_use_pm1pp1){
+        size_t before=found.size();
+        any |= pm1pp1_pass<K>(false, mod, g_pm1_bases,
+                              (int)(sizeof(g_pm1_bases)/sizeof(unsigned)), spow, pr, found);
+        any |= pm1pp1_pass<K>(true,  mod, g_pp1_seeds,
+                              (int)(sizeof(g_pp1_seeds)/sizeof(unsigned)), spow, pr, found);
+        if(found.size()>before){
+            mpz_t c; mpz_init_set(c,mod);
+            for(size_t i=before;i<found.size();i++){ mpz_t f; mpz_init_set_str(f,found[i].c_str(),10);
+                while(mpz_divisible_p(c,f)) mpz_divexact(c,c,f); mpz_clear(f); }
+            bool done = mpz_cmp_ui(c,1)==0 || mpz_probab_prime_p(c,25);
+            mpz_clear(c);
+            if(done){ printf("# P-1/P+1 reduced the cofactor to prime/1; skipping ECM at this B1\n");
+                      return true; }
+        }
+    }
+    any |= ecm_pass<K>(mod,curves,spow,pr,found,cps);
+    return any;
+}
+
+/* one stage at (B1,B2): sieve, pick K from the current modulus size, run the
+ * P-1/P+1/ECM sequence, append found prime factors of `mod`. 1 if any, -1 if too big. */
 static int run_stage(const mpz_t mod, unsigned long B1, unsigned long B2,
                      int curves, std::vector<std::string> &found, double &cps){
     if(B2<B1) B2=B1;
@@ -195,10 +299,10 @@ static int run_stage(const mpz_t mod, unsigned long B1, unsigned long B2,
     if(K==0) return -1;
     bool any=false;
     switch(K){
-        case 2:  any=ecm_pass<2 >(mod,curves,spow,pr,found,cps); break;
-        case 4:  any=ecm_pass<4 >(mod,curves,spow,pr,found,cps); break;
-        case 8:  any=ecm_pass<8 >(mod,curves,spow,pr,found,cps); break;
-        case 16: any=ecm_pass<16>(mod,curves,spow,pr,found,cps); break;
+        case 2:  any=run_stage_K<2 >(mod,curves,spow,pr,found,cps); break;
+        case 4:  any=run_stage_K<4 >(mod,curves,spow,pr,found,cps); break;
+        case 8:  any=run_stage_K<8 >(mod,curves,spow,pr,found,cps); break;
+        case 16: any=run_stage_K<16>(mod,curves,spow,pr,found,cps); break;
     }
     return any?1:0;
 }
@@ -223,7 +327,10 @@ static int report(const mpz_t N, std::vector<std::string> &found){
 int main(int argc, char**argv){
     if(argc<2){ fprintf(stderr,
         "usage: %s <N> [B1=50000] [curves=4096] [B2=100*B1]\n"
-        "       %s <N> staged [maxdigits=30] [curve_scale=1.0]\n", argv[0],argv[0]); return 2; }
+        "       %s <N> staged [maxdigits=30] [curve_scale=1.0]\n"
+        "  env: CADO_PREFACTOR_NOPM1PP1=1 disables the P-1/P+1 pre-passes (ECM only)\n",
+        argv[0],argv[0]); return 2; }
+    if(getenv("CADO_PREFACTOR_NOPM1PP1")) g_use_pm1pp1=false;   /* Track C7 toggle */
     mpz_t N; mpz_init(N);
     if(mpz_set_str(N, argv[1], 10)!=0){ fprintf(stderr,"bad N\n"); return 2; }
     if(mpz_even_p(N)){ fprintf(stderr,"N is even; strip factors of 2 first\n"); return 2; }
