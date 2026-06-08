@@ -45,6 +45,10 @@ __pycache__/
 /avx2-modinv
 /gpu-ropt-stage2
 /gpu-lingen-ntt
+# v3.4.0 standalone benches
+/gpu-prefactor-pm1pp1
+/gpu-ropt-threshold
+/gpu-lingen-ntt-crt
 # compiled outputs of the bench/harness/ header validators (sources kept)
 /bench/harness/hdrtest
 /bench/harness/hdrtest_pclmul

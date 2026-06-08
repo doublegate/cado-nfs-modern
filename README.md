@@ -1,4 +1,4 @@
-# CADO-NFS 3.3.0-modern
+# CADO-NFS 3.4.0-modern
 
 A **modernization + performance fork** of
 [CADO-NFS](https://gitlab.inria.fr/cado-nfs/cado-nfs) — a complete
@@ -32,6 +32,20 @@ logarithms in finite fields.
 > win), plus an honestly-gated GPU/DLP research track (GPU root-sieve, GPU GF(p)
 > lingen NTT, IFMA→arith-modp routing, an exTNFS skeleton) — each a validated,
 > measured kernel reported with its honest non-win where it is one.
+> **3.4.0-modern** keeps that shape and lands the one materially new opportunity the
+> codebase exploration surfaced: the GPU pre-NFS factoring front-end is the **one
+> stage with no Amdahl ceiling**, so it gets the cycle's **headline measured win** —
+> GPU **Pollard P-1 / Williams P+1** beside the batched ECM, on the bit-exact
+> Montgomery core, with an adaptive escalating-B1 schedule (**14/14 bit-exact vs
+> GMP, ~3.3× faster time-to-strip** on a P±1-smooth factor). Around it ships a real
+> **observability/usability core** — completion **notifications** (ntfy / Slack /
+> Discord / webhook / email / desktop), a structured **JSON event log** + a
+> Prometheus **`/metrics`** endpoint on both servers, a **multi-run history DB**
+> (`--list-runs` / `--compare-runs`), **per-phase + all-phases ETA**, a **`--wizard`**
+> parameter TUI — plus a **data-driven autotuner** (`--calibrate` + a regression
+> cost model on the run history that sharpens `--plan`, number-theoretic bounds
+> untouched), and the carry-forward research track (GPU root-sieve launch threshold
+> C5+, GPU GF(p) lingen NTT multi-modular CRT C6+).
 > Every change is gated on `make check` + verified `product == N` (or a bit-exact /
 > SDE validation); hardware-blocked items (multi-GPU/multi-node, AVX-512 perf) ship
 > as documented designs or correctness-validated kernels, not unvalidated claims.
@@ -41,13 +55,13 @@ logarithms in finite fields.
 > This is **not** the official CADO-NFS. For releases, ongoing development, and
 > support, use the upstream project (links at the bottom). Earlier releases are
 > preserved under their tags: `2.3.1-modern`, `v3.0.0-modern`, `v3.1.0-modern`,
-> `v3.2.0-modern`.
+> `v3.2.0-modern`, `v3.3.0-modern`.
 
 [![CI](https://github.com/doublegate/cado-nfs-modern/actions/workflows/ci.yml/badge.svg)](https://github.com/doublegate/cado-nfs-modern/actions/workflows/ci.yml)
 [![AVX-512 validation](https://github.com/doublegate/cado-nfs-modern/actions/workflows/avx512-validate.yml/badge.svg)](https://github.com/doublegate/cado-nfs-modern/actions/workflows/avx512-validate.yml)
 [![License: LGPL-2.1](https://img.shields.io/badge/License-LGPL%202.1-blue.svg)](COPYING)
 [![Upstream: 3.0.0](https://img.shields.io/badge/upstream-CADO--NFS%203.0.0-informational.svg)](https://gitlab.inria.fr/cado-nfs/cado-nfs)
-[![Release: 3.3.0-modern](https://img.shields.io/badge/release-3.3.0--modern-success.svg)](https://github.com/doublegate/cado-nfs-modern/releases/tag/v3.3.0-modern)
+[![Release: 3.4.0-modern](https://img.shields.io/badge/release-3.4.0--modern-success.svg)](https://github.com/doublegate/cado-nfs-modern/releases/tag/v3.4.0-modern)
 
 **Jump to:** [Quick start](#quick-start) · [Performance](#performance) ·
 [What this fork changes](#what-this-fork-changes-vs-upstream-300) ·
@@ -182,6 +196,20 @@ that, this fork adds four independently-validated tracks:
 | **3 · GPU ECM cofactorization** | A batched CUDA ECM backend (`sieve/ecm/gpu/`) behind `facul`/`las-cofactor`, validated bit-exact vs the CPU path | The GPU modmul primitive is ~39× a 20-core CPU — but cofactorization is only ~8 % of siever time, so **honestly, no net single-machine speedup at these sizes** (Amdahl-bounded). Documented as a measured negative, not an unsubstantiated win. |
 | **4 · Rust orchestration** | The `rust/` workspace — a static-binary work-unit **client** and an async **server**, same HTTP/JSON protocol + `wudb` SQLite schema | Interoperates with an unmodified `cado-nfs.py`; the Rust server can be **swapped in** for the Flask server live (`CADO_RUST_WU_SERVER=…`), with TLS, IP-whitelist, and cert-pinning. For multi-client robustness, not single-machine speed. |
 
+### New in 3.4.0-modern
+
+3.4.0 keeps the v3.3.0 shape — a shippable, measurable core plus an honestly-gated
+research track — and adds the one materially new opportunity the codebase
+exploration surfaced: **the GPU pre-NFS factoring front-end is the only pipeline
+stage with no Amdahl ceiling**, so it gets the cycle's headline *measured* win.
+
+| Track | What | Result |
+|-------|------|--------|
+| **C7 — GPU prefactor P-1/P+1 (headline, measured)** | Pollard **P-1** + Williams **P+1** (stage-1 + stage-2 BSGS) beside the batched ECM, on the bit-exact Montgomery core (`misc/gpu_prefactor/gpu_pm1_pp1.cuh`), interleaved under an **adaptive escalating-B1** schedule that stops once the cofactor is prime/1 | **14/14 bit-exact** vs CPU **and** a GMP reference (RTX 3090); every factor re-verified `f∣N`; **~3.3× faster time-to-strip** on a P-1-smooth factor, ~30 ms when they find nothing. Honest: one sequence = one lane (coverage + cheaper strip, not GPU throughput — that stays ECM). |
+| **Usability / observability core (E9–E12)** | Completion/failure **notifications** (ntfy/Slack/Discord/webhook/email/desktop); a structured NDJSON **event log** (`--json-log`) + a Prometheus **`/metrics`** endpoint on both servers; a **multi-run history DB** (`--list-runs`/`--compare-runs`); **per-phase + all-phases ETA** in the monitor + `/dashboard`; a **`--wizard`** parameter TUI; path-aware completions + man EXAMPLES | All runs here, all default-off and additive (no NFS-math change). `notify.py`/`runs.py`/`wizard.py` doctested; secrets stay out of the parameter snapshot; notification/recording failures are isolated from the run. |
+| **A7 — Data-driven autotuner** | **`--calibrate`** backs out this host's per-core speed from `~/.cado-nfs/runs.db`; a **log-linear regression cost model** over the run history folds an empirical estimate into `--plan` | Seeded validation: recovers **1.500×** and R²=0.978; sharpens the plan as the history grows. **Number-theoretic bounds (`lim*`/`lpb*`/`mfb*`/`I`) are never touched** — prediction only. |
+| **Research track (C5+/C6+)** | A **conditional-launch threshold** that unlocks the v3.3.0 GPU root-sieve at large N with no small-N regression; a **multi-modular CRT wrapper** around the GPU GF(p) lingen NTT (the piece C6 said real coefficients need) | C5+ bit-exact at every size, heuristic routes to the measured-faster path (crossover ~16 M-cell lines, **~3.9×** at large N); C6+ CRT **== `__int128` convolution, 0/2999 wrong**. Honestly scoped: large-N / cluster-DLP, not a desktop win. |
+
 ### New in 3.3.0-modern
 
 3.3.0 opens on the conclusion the prior three revisions measured repeatedly:
@@ -274,13 +302,16 @@ The pipeline, stage by stage (each maps to a top-level directory):
 | [`docs/gpu-linalg.md`](docs/gpu-linalg.md) | GPU BWC SpMV backend + full vector residency: kernel, transfer analysis, at-scale sweep, multi-GPU partition (per-device streams) |
 | [`docs/gpu-ecm-mixedrep.md`](docs/gpu-ecm-mixedrep.md) | **(3.2.0)** GPU twisted-Edwards mixed-representation ECM: bit-exact vs the ladder, ~1.5–2.9× (CPU already does it upstream) |
 | [`docs/gpu-prefactor.md`](docs/gpu-prefactor.md) | GPU pre-NFS ECM factoring front-end: why it sidesteps Amdahl, the multi-precision Montgomery ECM, measured CPU-vs-GPU |
+| [`docs/gpu-prefactor-pm1pp1-c7.md`](docs/gpu-prefactor-pm1pp1-c7.md) | **(3.4.0, C7 — headline)** GPU Pollard P-1 / Williams P+1 + adaptive escalating-B1 on the prefactor front-end: 14/14 bit-exact vs GMP, ~3.3× faster time-to-strip |
+| [`docs/usability-v340.md`](docs/usability-v340.md) | **(3.4.0, E9–E12 + A7)** notifications, NDJSON event log + Prometheus `/metrics`, run-history DB, per-phase ETA + `--wizard`, the data-driven autotuner |
+| [`docs/ROADMAP-v3.4.0-modern.md`](docs/ROADMAP-v3.4.0-modern.md) | **(3.4.0)** the cycle anchor: the "speed tapped out" premise, the one new opportunity (the no-Amdahl prefactor stage), the track map + gates |
 | [`docs/gpu-cofactorization.md`](docs/gpu-cofactorization.md) | GPU ECM cofactorization: measured results + honest Amdahl analysis (+ cofactor scale-out / product-tree designs) |
 | [`docs/gpu-batch-smooth-c3.md`](docs/gpu-batch-smooth-c3.md) · [`docs/gpu-sieving-c4.md`](docs/gpu-sieving-c4.md) | **(3.2.0)** GPU batch-smoothness leaf (validated); GPU lattice-sieving feasibility (measured negative) |
 | [`docs/avx512-sieving-b1.md`](docs/avx512-sieving-b1.md) · [`docs/ifma-gfp-b3.md`](docs/ifma-gfp-b3.md) | **(3.2.0)** AVX-512 batched modular inverse for the siever; IFMA GF(p) for the BWC backend (both SDE-validated) |
 | [`docs/parallel-merge-a3.md`](docs/parallel-merge-a3.md) · [`docs/extnfs-a4.md`](docs/extnfs-a4.md) · [`docs/multinode-residency-d2.md`](docs/multinode-residency-d2.md) | **(3.2.0)** Parallel merge (already upstream, verified); exTNFS-DLP feasibility; multi-node NVSHMEM/GPUDirect residency design |
 | [`docs/rust-orchestration.md`](docs/rust-orchestration.md) | The Rust client/server, the work-unit protocol, the in-process swap, and `cluster-launch.sh` (Slurm/SSH/GPU-aware) |
 | [`BENCHMARKS.md`](BENCHMARKS.md) | Performance sweep, per-phase breakdown, methodology, projections (incl. GPU pre-factoring + GPU linalg + the 3.2.0 GPU/AVX-512 additions) |
-| [`CHANGELOG.md`](CHANGELOG.md) | Everything this fork changed, with rationale (3.2.0-modern · 3.1.0-modern · 3.0.0-modern · 2.3.1-modern) |
+| [`CHANGELOG.md`](CHANGELOG.md) | Everything this fork changed, with rationale (3.4.0-modern · 3.3.0-modern · 3.2.0-modern · 3.1.0-modern · 3.0.0-modern · 2.3.1-modern) |
 | [`CLAUDE.md`](CLAUDE.md) | Build/test/run notes and the fork's internal map |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) · [`SECURITY.md`](SECURITY.md) | How to contribute here vs upstream; security-reporting policy |
 | [`README.dlp`](README.dlp) · [`README.Python`](README.Python) | Discrete logarithms; Python orchestration internals (upstream) |

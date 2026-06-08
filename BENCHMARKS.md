@@ -303,7 +303,62 @@ stays scalar, so the whole-siever ceiling is ~1.05–1.10× even at 4.6× on thi
 
 ---
 
-## 8. Reproducing
+## 8. v3.4.0 additions (measured 2026-06-07)
+
+### 8.1 GPU prefactor P-1 / P+1 + adaptive B1 — measured on the silicon (C7)
+
+The GPU pre-NFS factoring front-end (the one pipeline stage with no Amdahl ceiling)
+gains Pollard **P-1** and Williams **P+1** beside the batched ECM, on the same
+bit-exact Montgomery core (`misc/gpu_prefactor/gpu_pm1_pp1.cuh`).
+
+- **Correctness** (`bench/gpu-prefactor-pm1pp1-validate.sh`, RTX 3090, K ∈ {2,4}):
+  **14 pass / 0 fail** — kernels bit-exact vs the host code **and** vs an independent
+  GMP reference (`mpz_powm` for P-1, a GMP Lucas chain for P+1), stage 1 + stage 2;
+  plus functional cracks of crafted p-1- / p+1-smooth composites (incl. P-1 stage 2).
+  Every recovered factor re-verified `f | N`; per-run self-check `0/4`–`0/6` lanes
+  differ.
+- **Time-to-strip win** — `N = p·q`, `p` a 21-digit factor with `p-1` 2000-powersmooth:
+  **0.52 s** with P-1/P+1 (P-1 strips it at B1=2000, ECM **skipped**) vs **1.73 s**
+  ECM-only (must escalate to B1=11000) → **~3.3×**, `product == N` both ways.
+- **Honest cost when they find nothing** — general 12-digit factor (not p±1-smooth):
+  ~0.37 s with P-1/P+1 vs ~0.34 s ECM-only → **~30 ms** for the one-lane pre-passes +
+  self-check. On a single N these are coverage, not throughput (one sequence = one
+  lane); the throughput win of the front-end remains ECM's. See
+  [`docs/gpu-prefactor-pm1pp1-c7.md`](docs/gpu-prefactor-pm1pp1-c7.md).
+
+### 8.2 Usability / observability core + data-driven autotuner (E9–E12, A7)
+
+Operator experience, not raw speed — all default-off and additive. Measured /
+validated on the reference box:
+
+- **E10 event log** — a 59-digit smoke run (`-t 4`, ~15 s) emits exactly 14 NDJSON
+  lines: `run_start`, 12 × `phase_start`, `run_finish` (`state=done`,
+  `elapsed=15.4`, 4 factors). `/metrics` renders valid Prometheus exposition on
+  both servers.
+- **E11 run history** — the same run records one `~/.cado-nfs/runs.db` row;
+  `--list-runs` / `--compare-runs 59` render the table + min/mean/max wall.
+- **A7 calibrate** — 5 seeded runs at a clean 1.5× host speed → `--calibrate`
+  recovers **1.500×** and a log-linear cost-model fit **R² = 0.978**; the `--plan`
+  empirical refinement lands inside the ±20 % band of the static model ÷ 1.5.
+- **E9/E12** — `notify.py`/`runs.py`/`wizard.py` doctested; `--wizard` and the
+  monitor/dashboard per-phase + all-phases ETA verified interactively.
+
+### 8.3 GPU research (C5+/C6+) — bit-exact, honest (RTX 3090)
+
+`bench/gpu-research-v340-validate.sh`:
+
+- **C5+ root-sieve launch threshold** — bit-exact at every swept line length; the
+  heuristic routes each size to the measured-faster path. CPU wins to 4 M-cell
+  lines; GPU pulls **~3.9×** ahead at 16 M cells (~2×10⁸ scatter updates) — the
+  crossover, confirming C5's "large-N only" finding quantitatively.
+- **C6+ lingen NTT multi-modular CRT** — 4 NTT primes (product ~2¹²³), degree
+  1500×1500: CRT reconstruction **== `__int128` integer convolution, 0/2999 wrong**,
+  and **0/2999** after reduction mod a ~107-bit prime. Validates the CRT mechanism
+  C6 said real GF(p) coefficients need; not a single-machine win.
+
+---
+
+## 9. Reproducing
 
 ```bash
 # one-time: create the Flask/requests venv the 3.0.0 orchestrator needs
@@ -343,9 +398,20 @@ nvcc -arch=sm_86 -O3 bench/gpu-ropt-stage2.cu -o gpu-ropt-stage2 && ./gpu-ropt-s
 nvcc -arch=sm_86 -O3 bench/gpu-lingen-ntt.cu -o gpu-lingen-ntt && ./gpu-lingen-ntt        # C6
 bash bench/ifma-validate.sh                                                     # B5 (extended; SDE)
 $PY ./cado-nfs.py --doctor <N>            # E5 preflight; --galois-detect FILE   # A5
+
+# 8. v3.4.0 additions (need CUDA + an NVIDIA GPU; standalone, no CADO build):
+bash bench/gpu-prefactor-pm1pp1-validate.sh                                     # C7 (P-1/P+1, GPU vs CPU & GMP)
+# end-to-end time-to-strip win vs ECM-only (a p-1-smooth factor):
+nvcc -arch=sm_86 -O3 misc/gpu_prefactor/gpu-prefactor.cu -lgmp -o gpu-prefactor
+./gpu-prefactor <N> staged 30                       # default: P-1/P+1 + adaptive B1 + ECM
+CADO_PREFACTOR_NOPM1PP1=1 ./gpu-prefactor <N> staged 30   # ECM only (disable C7)
+bash bench/gpu-research-v340-validate.sh                                        # C5+/C6+ (root-sieve threshold; lingen CRT)
+# usability core (no GPU needed): event log + run history + calibrate
+$PY ./cado-nfs.py <N> --notify desktop --json-log run.ndjson -t 4              # E9/E10
+$PY ./cado-nfs.py --list-runs; $PY ./cado-nfs.py --calibrate; $PY ./cado-nfs.py --wizard  # E11/A7/E12
 ```
 
 _CPU/3.1.0 numbers re-confirmed 2026-06-06; the §6 3.2.0 additions measured
-2026-06-07 (CADO-NFS 3.2.0-modern) on the machine above. Re-run on your own
-hardware to recalibrate; `-t <n>` sets the thread count, `-DENABLE_GPU=ON` in
-`local.sh` builds the GPU backend._
+2026-06-07 (CADO-NFS 3.2.0-modern); the §7 (3.3.0) and §8 (3.4.0) additions measured
+2026-06-07 on the machine above. Re-run on your own hardware to recalibrate; `-t <n>`
+sets the thread count, `-DENABLE_GPU=ON` in `local.sh` builds the GPU backend._

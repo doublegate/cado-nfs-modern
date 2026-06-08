@@ -58,19 +58,21 @@ project(CADO_NFS)
 include(config/xcode.cmake)
 
 set(CADO_VERSION_MAJOR  3)
-set(CADO_VERSION_MINOR  3)
+set(CADO_VERSION_MINOR  4)
 set(CADO_VERSION_PATCHLEVEL 0)
 # This fork carries a "-modern" suffix and, from 3.1.0-modern on, its own minor
 # line: the NFS algorithms/parameters remain upstream 3.0.0's, but the fork now
 # carries substantial original work (GPU pre-factoring, GPU linear algebra, the
 # Rust orchestration layer, UX/HPC tooling) beyond a pure upstream mirror, so the
-# minor version is bumped to reflect that. 3.3.0-modern opens the next cycle: the
-# operator-experience core (live dashboard + ETA, a --doctor preflight, shell
-# completions + man pages, checkpoint/resume clarity, Slurm/PBS integration), the
-# first measured-on-silicon AVX2 SIMD kernels, Galois-automorphism auto-detection,
-# plus an honestly-gated GPU/DLP research track (GPU root-sieve, GPU GF(p) lingen
-# NTT, IFMA->arith-modp wiring, an exTNFS skeleton). See CHANGELOG.md. No test
-# depends on the version string.
+# minor version is bumped to reflect that. 3.4.0-modern opens the next cycle on the
+# four-times-confirmed premise that single-machine NFS *speed* is tapped out: its
+# headline measured win is a stronger GPU pre-NFS factoring front-end (Pollard
+# P-1/P+1 + adaptive escalating-B1 alongside the batched ECM -- the one pipeline
+# stage with no Amdahl ceiling), plus an operator-experience core (completion
+# notifications, a Prometheus /metrics + JSON event log, a multi-run history DB,
+# per-phase ETA, a parameter wizard), a data-driven autotuner, and a carry-forward
+# honestly-gated GPU/DLP research track. See CHANGELOG.md. No test depends on the
+# version string.
 set(CADO_VERSION_SUFFIX  "-modern")
 set(CADO_VERSION_STRING  "${CADO_VERSION_MAJOR}.${CADO_VERSION_MINOR}.${CADO_VERSION_PATCHLEVEL}${CADO_VERSION_SUFFIX}")
 

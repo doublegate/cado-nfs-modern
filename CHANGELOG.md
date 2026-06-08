@@ -9,10 +9,98 @@ This is a downstream **modernization + performance fork** of upstream
 rebased onto upstream **3.0.0**; only the changes introduced by this fork are
 listed. For the upstream history see [`NEWS`](NEWS). The earlier `2.3.1-modern`
 release (rebased on upstream 2.3.0) is preserved under the `v2.3.1-modern` tag;
-`main` tracks the latest release (`3.2.0-modern`); the **`3.3.0-modern` cycle is
+`main` tracks the latest release (`3.3.0-modern`); the **`3.4.0-modern` cycle is
 in progress** (section directly below).
 
-## [3.3.0-modern] — unreleased (in progress)
+## [3.4.0-modern] — unreleased (in progress)
+
+The cycle after `3.3.0-modern`, opened on the now **four-times-confirmed** premise
+that on the reference hardware (i9-10850K, Comet Lake — AVX2 but no AVX-512; a
+single RTX 3090, sm_86) single-machine NFS *speed* is essentially tapped out. A
+fresh June-2026 internet survey (upstream CADO; the sethtroisi/MichaelBell forks;
+msieve, YAFU, GGNFS; GMP-ECM / ecmongpu / CGBN; pstach/gls; the RSA-250 / DLP-240 /
+F_p^4–F_p^6 record papers; 2021–2026 eprint/arxiv) reconfirms it: no published
+technique since ~2010 yields a >5 % single-machine speedup, GPU lattice sieving is
+still a measured negative, AVX-512 is silicon-gated and memory-bound anyway,
+ML-polyselect has no production code, and tower-NFS is DLP-only research with no
+approachable open-source siever. No integer-factoring record has moved since
+RSA-250 (Feb 2020).
+
+So `3.4.0-modern` keeps the v3.3.0 shape — a shippable, measurable usability core
+plus an honestly-gated research track — but adds one materially new opportunity the
+codebase exploration surfaced: **the GPU pre-NFS factoring front-end is the one
+place in the whole pipeline with no Amdahl ceiling** (it is a *separate stage*, not
+a fraction of sieve time — which is exactly why it measured 49×/26×/12× in
+3.1.0-modern while in-sieve GPU cofactorization, Amdahl-capped at ~8 % of sieve,
+netted <1 %). It runs ECM only today.
+
+**Headline (measured-on-silicon, this cycle's standout):**
+
+- **C7 — GPU prefactor: Pollard P-1/P+1 + adaptive escalating-B1.** Add Pollard P-1
+  (finds p with p-1 smooth) and P+1 (Williams, Lucas sequences; finds p with p+1
+  smooth) — stage-1 + stage-2 BSGS — to the GPU pre-factoring front-end, reusing the
+  bit-exact-validated multi-precision Montgomery arithmetic, and interleave them
+  with the batched ECM under an adaptive escalating-B1 schedule that stops as soon
+  as the cofactor is prime/1. P-1/P+1 catch special-form factors the ECM curve count
+  can miss, at near-zero added cost. Bit-exact vs a GMP reference; every recovered
+  factor re-verified `f | N`; measured on the RTX 3090. Honest scope: on a single N
+  each P-1/P+1 sequence is one lane (its value is *coverage* + cheaper time-to-strip,
+  not GPU throughput — the throughput win remains ECM's thousands of parallel
+  curves). See `docs/gpu-prefactor-pm1pp1-c7.md`.
+
+**Usability / observability core (shippable, runs here):** completion/failure
+notifications (ntfy / Slack / Discord / webhook / email / desktop); a structured
+JSON event log + a Prometheus `/metrics` endpoint on both servers; a multi-run
+history DB (`~/.cado-nfs/runs.db`) with `--list-runs`/`--compare-runs`; per-phase
+ETA in the monitor + `/dashboard`; a `--wizard` parameter TUI and richer dynamic
+shell completions. **Data-driven autotuner:** a `--calibrate` host-speed pass + a
+regression cost model trained on the run history, sharpening `--plan`/`--suggest-params`
+(number-theoretic bounds left untouched — those gate `product == N`). **Research
+track (carry-forward, gated, honest):** GPU root-sieve conditional-launch heuristic
+(C5+), GPU GF(p) lingen NTT multi-prime CRT wrapper (C6+, cluster/DLP), the
+IFMA→`arith-modp` route (B5, HW-gated), the exTNFS skeleton (A6, documented design).
+Same ethos as ever: no NFS-math changes; honest negatives recorded, not hidden.
+
+### Added
+
+- **C7 — GPU prefactor P-1/P+1 + adaptive escalating-B1** (headline, measured):
+  `misc/gpu_prefactor/gpu_pm1_pp1.cuh` (`montpow`/`pm1_run`, `lucas_chain`/`pp1_run`
+  + kernels) integrated into `gpu-prefactor.cu` via `pm1pp1_pass` + `run_stage_K`;
+  P-1/P+1 run first per escalating B1, ECM is skipped once the cofactor is prime/1;
+  `CADO_PREFACTOR_NOPM1PP1=1` disables. **14/14 bit-exact** vs CPU and a GMP
+  reference (`bench/gpu-prefactor-pm1pp1.cu` + `.sh`), every factor re-verified
+  `f|N`; **~3.3× faster time-to-strip** on a P-1-smooth factor, ~30 ms overhead when
+  they find nothing. `docs/gpu-prefactor-pm1pp1-c7.md`, `BENCHMARKS.md` §8.
+- **E9 — Notifications:** `scripts/cadofactor/notify.py` (doctested) + `--notify`
+  (`desktop`/`ntfy`/`slack`/`discord`/`webhook`/`email`); secrets via env /
+  `[notifications]` block, never the snapshot; fired through a `status.py` finish
+  hook (covers normal, error, and GPU-only completions); channel errors isolated.
+- **E10 — Event log + `/metrics`:** `--json-log FILE` NDJSON event stream
+  (`run_start`/`phase_start`/`run_finish`) via the status hub; a Prometheus
+  `/metrics` endpoint on the Flask `api_server.py` (`cado_nfs_*`, from
+  `status.py::prometheus()`) and the Rust `cado-wu-server` (`cado_wu_*`, from the
+  wudb).
+- **E11 — Multi-run history DB:** `scripts/cadofactor/runs.py` (doctested) →
+  `~/.cado-nfs/runs.db` (override `CADO_RUNS_DB`), recorded per terminal run via a
+  finish hook; `--list-runs` / `--compare-runs SPEC` (recent / by-digits / `A:B`).
+- **A7 — Data-driven autotuner:** `planner.calibrate_host_speed` (geometric-mean
+  back-out of per-core speed from `runs.db`) + `planner.regression_estimate`
+  (log-linear OLS cost model); `--calibrate` and an empirical refinement folded into
+  `--plan` alongside the static model. Number-theoretic bounds untouched. Validated
+  on seeded runs (1.500× recovered, R²=0.978).
+- **E12 — Per-phase ETA + wizard + completions:** `cado-nfs-monitor-rs` and
+  `/dashboard` reset the trend window on phase change (per-phase ETA) and add an
+  all-phases ETA; `--wizard` parameter TUI (`scripts/cadofactor/wizard.py`,
+  doctested); path-aware shell completions (63 option strings) + a man-page
+  EXAMPLES/monitoring section. `docs/usability-v340.md`.
+- **C5+/C6+ — research (bit-exact, honest):** GPU root-sieve conditional-launch
+  threshold (`bench/gpu-ropt-threshold-c5plus.cu`; bit-exact every size, heuristic
+  routes to the measured-faster path — crossover ~16 M-cell lines, ~3.9× at large
+  N); GPU GF(p) lingen NTT multi-modular CRT wrapper
+  (`bench/gpu-lingen-ntt-crt-c6plus.cu`; CRT == `__int128` convolution, 0/2999
+  wrong). `bench/gpu-research-v340-validate.sh`; docs updated.
+
+## [3.3.0-modern] — 2026-06-07
 
 The cycle after `3.2.0-modern`, opened on an honest premise the fork has now
 confirmed three times over: **on the reference hardware (i9-10850K, Comet Lake —
