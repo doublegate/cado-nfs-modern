@@ -18,11 +18,16 @@ foreach (doctest_source ${PYTHON_DOCTEST_SOURCES})
   get_filename_component (basename ${doctest_source} NAME_WE)
   # Add doctest of Python sources, e.g., doctest cadoparams.py under test
   # name cadoparams
+  # Use the SAME interpreter cmake was configured with (config/python.cmake sets
+  # PYTHON_EXECUTABLE; this fork's local.sh points it at cado-nfs.venv, which has
+  # the orchestrator's deps -- Flask/requests/sqlite3). A bare `python3` would run
+  # the doctests under whatever interpreter is first on PATH, which may lack those
+  # deps (e.g. toplevel.py/cadotask.py import the Flask api_server at module load).
   cado_define_test(TEST_NAME test_python_${basename}
       ENVIRONMENT PYTHONPATH=${CADO_NFS_SOURCE_DIR}/scripts
       PRECOMMAND ${CADO_NFS_SOURCE_DIR}/tests/provide-wdir.sh --env TMPDIR
       PROGRAM
-      python3 -m doctest ${CADO_NFS_SOURCE_DIR}/${doctest_source}
+      ${PYTHON_EXECUTABLE} -m doctest ${CADO_NFS_SOURCE_DIR}/${doctest_source}
       )
   set_tests_properties(test_python_${basename} PROPERTIES RUN_SERIAL 1)
 endforeach (doctest_source)
