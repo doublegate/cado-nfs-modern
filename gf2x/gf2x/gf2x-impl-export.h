@@ -93,4 +93,8 @@
 #include <wmmintrin.h>
 #endif
 
+#ifdef  GF2X_HAVE_VPCLMUL_SUPPORT
+#include <immintrin.h>
+#endif
+
 #endif	/* GF2X_IMPL_EXPORT_H_ */
