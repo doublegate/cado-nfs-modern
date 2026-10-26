@@ -25,6 +25,7 @@ on:
       - 'bench/ifma-*'
       - 'bench/avx512-*'
       - 'bench/avx2-*'
+      - '.github/workflows/avx512-validate.yml'
   workflow_dispatch:
 
 permissions:
@@ -39,7 +40,9 @@ jobs:
     name: VPCLMULQDQ gf2x bit-exact under SDE
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       - name: Install Intel SDE (best-effort)
         continue-on-error: true
@@ -105,7 +108,9 @@ jobs:
     name: AVX2 batched modinv bit-exact + measured (native, B4)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       # GitHub's x86-64 runners expose AVX2, so unlike the AVX-512 work this runs
       # NATIVELY (no SDE) and reports a real measured scalar-vs-AVX2 speedup
       # alongside the bit-exact-vs-GMP check. If a runner lacks AVX2 the validate
