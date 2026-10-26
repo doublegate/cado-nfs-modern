@@ -92,17 +92,23 @@ jobs:
           make check
 
       - name: Build the vpclmul backend and run gf2x tests under SDE
-        if: env.SDE != ''
         run: |
           set -x
           mkdir -p /tmp/gf2xvpcl && cd /tmp/gf2xvpcl
-          # Force the vpclmul hwdir and the AVX-512 flags, then run the test
-          # binaries under SDE (LOG_COMPILER) so the emulated CPU executes them.
+          # Force the vpclmul hwdir and the AVX-512 flags; always verify the
+          # backend compiles, and if SDE is present run the test binaries under
+          # emulation.
           "$GITHUB_WORKSPACE/gf2x/configure" hwdir=x86_64_vpclmul \
+            gf2x_cv_cc_supports_vpclmul=yes \
             CFLAGS="-O2 -mavx512f -mvpclmulqdq" >cfg.log 2>&1 || (cat cfg.log; exit 1)
           grep -E 'hwdir=' cfg.log | tail -1
           make -j"$(nproc)"
-          make check LOG_COMPILER="$SDE -future --"
+          if [ -n "${SDE:-}" ]; then
+            make check \
+              LOG_COMPILER="$SDE -future --" \
+              MUL_LOG_COMPILER="$SDE -future -- $GITHUB_WORKSPACE/gf2x/tests/do-check-mul.sh" \
+              FFT_LOG_COMPILER="$SDE -future -- $GITHUB_WORKSPACE/gf2x/tests/do-check-fft.sh"
+          fi
 
   avx2-modinv:
     name: AVX2 batched modinv bit-exact + measured (native, B4)

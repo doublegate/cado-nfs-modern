@@ -41,6 +41,12 @@
 #undef GF2X_HAVE_PCLMUL_SUPPORT
 #endif
 
+/* Define if vpclmul as present in the source tree is supported by the compiler
+   and hardware */
+#ifndef GF2X_HAVE_VPCLMUL_SUPPORT
+#undef GF2X_HAVE_VPCLMUL_SUPPORT
+#endif
+
 /* Define if sse-2 code as present in the source tree is supported by the
    compiler */
 #ifndef GF2X_HAVE_SSE2_SUPPORT

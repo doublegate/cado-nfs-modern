@@ -99,6 +99,10 @@ jobs:
             echo "Invalid release tag: $TAG" >&2
             exit 1
           fi
+          if ! git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            echo "Tag ${TAG} does not exist. Create the tag before releasing." >&2
+            exit 1
+          fi
           VERSION="${TAG#v}"                      # v3.0.0-modern -> 3.0.0-modern
           echo "tag=$TAG"          >> "$GITHUB_OUTPUT"
           echo "version=$VERSION"  >> "$GITHUB_OUTPUT"
@@ -161,6 +165,6 @@ jobs:
             gh release edit "$TAG" --title "CADO-NFS ${TAG}" --notes-file notes.md $PREREL
             gh release upload "$TAG" "${TARBALL}" "${CHECKSUM}" --clobber
           else
-            gh release create "$TAG" "${ARGS[@]}"
+            gh release create "$TAG" --verify-tag "${ARGS[@]}"
           fi
           echo "Done: $(gh release view "$TAG" --json url -q .url)"
